@@ -302,3 +302,13 @@ request id. Probes arrive every few seconds and would bury everything else.
 
 **In practice.** In production the logs are JSON, one object per line, ready for an
 aggregator. The client name is never the secret.
+
+## 21. The build gate also runs in CI, and the image is started, not just built
+
+**What we do.** GitHub Actions runs `npm run check` and `npm audit` on every push and pull
+request, builds the production image, starts it, calls `/health`, and proves that it refuses
+to start without `API_KEYS`. Dependabot proposes dependency updates weekly.
+
+**Why.** A gate that only runs on a developer's machine is a convention, not a guarantee.
+Building an image proves the Dockerfile; starting it proves the image, the environment
+contract and the fail-fast behaviour together.

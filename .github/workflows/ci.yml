@@ -1,0 +1,51 @@
+# Every push and pull request runs the same gate as `npm run check` locally, then proves the
+# production image builds, starts with a valid environment and answers the health probe.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Format, lint, types, tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - run: npm run check
+      - run: npm audit --audit-level=high
+
+  image:
+    name: Production image
+    runs-on: ubuntu-latest
+    needs: check
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t program-capacity-service:ci .
+      - name: Smoke test
+        run: |
+          docker run -d --name service -p 3000:3000 \
+            -e API_KEYS='ci:ci-key-0123456789abcdef:read+write' \
+            program-capacity-service:ci
+          for i in $(seq 1 30); do
+            curl -sf localhost:3000/health >/dev/null && break
+            sleep 1
+          done
+          curl -sf localhost:3000/health
+          echo
+          docker logs service
+          docker rm -f service
+      - name: Refuses to start without API keys
+        run: |
+          set +e
+          docker run --rm program-capacity-service:ci
+          test $? -ne 0

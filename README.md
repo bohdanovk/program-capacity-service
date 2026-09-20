@@ -46,6 +46,10 @@ Everything at once (format check, lint with architecture rules, type check, unit
 npm run check
 ```
 
+The same gate runs in CI on every push and pull request, followed by a build of the
+production image, a start-up smoke test and a check that it refuses to run without API keys
+(`.github/workflows/ci.yml`).
+
 ## Walkthrough
 
 In development two keys exist by default: `dev-admin-key-0123456789` (read and write) and
