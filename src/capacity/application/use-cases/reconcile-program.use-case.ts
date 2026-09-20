@@ -23,14 +23,14 @@ export class ReconcileProgramUseCase {
   ) {}
 
   execute(command: ReconcileProgramCommand): Promise<ReconcileProgramOutcome> {
-    const programCurrency = Currency.of(command.currency);
+    const programCurrency = Currency.parse(command.currency);
     const snapshot: TreasurySnapshot = {
       sequence: command.sequence,
       asOf: command.asOf,
       creditLimit: Money.parse(command.creditLimit, programCurrency),
       activeReservations: command.activeReservations.map((entry) => ({
         invoiceId: entry.invoiceId,
-        invoiceAmount: Money.parse(entry.invoiceAmount, Currency.of(entry.invoiceCurrency)),
+        invoiceAmount: Money.parse(entry.invoiceAmount, Currency.parse(entry.invoiceCurrency)),
         reservedAmount: Money.parse(entry.reservedAmount, programCurrency),
       })),
     };
@@ -41,11 +41,12 @@ export class ReconcileProgramUseCase {
       const program =
         existing ??
         Program.create({ id: command.programId, creditLimit: snapshot.creditLimit, at: now });
-
       const result = program.reconcile(snapshot, now);
+
       if (result.outcome === 'APPLIED') {
         await this.programs.save(program);
       }
+
       return { ...result, created: existing === null && result.outcome === 'APPLIED' };
     });
   }

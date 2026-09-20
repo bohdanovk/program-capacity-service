@@ -24,7 +24,7 @@ export class ApplyTreasuryLimitUseCase {
   ) {}
 
   execute(command: ApplyTreasuryLimitCommand): Promise<TreasuryLimitOutcome> {
-    const creditLimit = Money.parse(command.creditLimit, Currency.of(command.currency));
+    const creditLimit = Money.parse(command.creditLimit, Currency.parse(command.currency));
 
     return withConcurrencyRetry(async () => {
       const now = this.clock.now();
@@ -38,7 +38,9 @@ export class ApplyTreasuryLimitUseCase {
       if (outcome === 'STALE') {
         return 'STALE';
       }
+
       await this.programs.save(program);
+
       return existing === null ? 'CREATED' : 'APPLIED';
     });
   }

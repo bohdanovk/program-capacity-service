@@ -32,8 +32,15 @@ describe('Money', () => {
       expect(() => Money.parse('100.5', JPY)).toThrow(InvalidMoneyAmountError);
     });
 
-    it('rejects unknown currencies', () => {
-      expect(() => Currency.of('XXX')).toThrow(UnsupportedCurrencyError);
+    it.each(['XXX', 'usd', ' USD', 'USD '])(
+      'rejects currency input "%s" instead of repairing it',
+      (input) => {
+        expect(() => Currency.parse(input)).toThrow(UnsupportedCurrencyError);
+      },
+    );
+
+    it('accepts an exact registry code', () => {
+      expect(Currency.parse('KWD').minorUnits).toBe(3);
     });
   });
 

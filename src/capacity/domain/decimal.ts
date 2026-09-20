@@ -1,3 +1,5 @@
+import type { MinorUnits } from './currency';
+
 /**
  * Exact fixed-point decimal helpers on top of bigint.
  *
@@ -5,6 +7,15 @@
  * pence, yen). Floating point never enters the picture: amounts are parsed from and
  * formatted to decimal strings.
  */
+
+/** Fixed-point scale of exchange rates (decimal digits). */
+export const RATE_SCALE = 10;
+
+/**
+ * The only scales this domain works with: a currency's minor units (from the currency
+ * registry) or the rate scale. Any other number is a type error.
+ */
+export type DecimalScale = MinorUnits | typeof RATE_SCALE;
 
 /** Rounding modes with java.math.BigDecimal semantics. */
 export enum RoundingMode {
@@ -18,7 +29,7 @@ export enum RoundingMode {
 
 const DECIMAL_PATTERN = /^(-)?(\d+)(?:\.(\d+))?$/;
 
-export function pow10(exponent: number): bigint {
+export function pow10(exponent: DecimalScale): bigint {
   return 10n ** BigInt(exponent);
 }
 
@@ -27,26 +38,30 @@ export function pow10(exponent: number): bigint {
  * Returns null when the text is not a plain decimal or carries more fraction digits
  * than the scale allows. Excess precision is never silently rounded away.
  */
-export function parseScaledDecimal(text: string, scale: number): bigint | null {
+export function parseScaledDecimal(text: string, scale: DecimalScale): bigint | null {
   const match = DECIMAL_PATTERN.exec(text);
   if (match === null) {
     return null;
   }
+
   const [, sign, integerPart = '', fractionPart = ''] = match;
   if (fractionPart.length > scale) {
     return null;
   }
+
   const magnitude = BigInt(integerPart + fractionPart.padEnd(scale, '0'));
+
   return sign === '-' ? -magnitude : magnitude;
 }
 
 /** Formats a scaled integer as a plain decimal string with exactly `scale` fraction digits. */
-export function formatScaledDecimal(value: bigint, scale: number): string {
+export function formatScaledDecimal(value: bigint, scale: DecimalScale): string {
   const negative = value < 0n;
   const digits = (negative ? -value : value).toString().padStart(scale + 1, '0');
   const integerPart = digits.slice(0, digits.length - scale);
   const fractionPart = digits.slice(digits.length - scale);
   const sign = negative ? '-' : '';
+
   return scale === 0 ? `${sign}${integerPart}` : `${sign}${integerPart}.${fractionPart}`;
 }
 
@@ -55,6 +70,7 @@ export function stripTrailingFractionZeros(decimal: string): string {
   if (!decimal.includes('.')) {
     return decimal;
   }
+
   return decimal.replace(/\.?0+$/, '');
 }
 

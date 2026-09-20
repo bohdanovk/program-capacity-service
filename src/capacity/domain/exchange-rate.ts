@@ -4,6 +4,7 @@ import {
   formatScaledDecimal,
   parseScaledDecimal,
   pow10,
+  RATE_SCALE,
   RoundingMode,
   stripTrailingFractionZeros,
 } from './decimal';
@@ -15,7 +16,7 @@ import { Money } from './money';
  * with {@link ExchangeRate.SCALE} decimal digits.
  */
 export class ExchangeRate {
-  static readonly SCALE = 10;
+  static readonly SCALE = RATE_SCALE;
 
   private constructor(
     readonly base: Currency,
@@ -25,9 +26,11 @@ export class ExchangeRate {
 
   static parse(base: Currency, quote: Currency, rate: string): ExchangeRate {
     const scaled = parseScaledDecimal(rate, ExchangeRate.SCALE);
+
     if (scaled === null || scaled <= 0n) {
       throw new InvalidExchangeRateError(base.code, quote.code, rate);
     }
+
     return new ExchangeRate(base, quote, scaled);
   }
 
@@ -52,8 +55,10 @@ export class ExchangeRate {
         `Rate ${this.base.code}/${this.quote.code} cannot convert this amount`,
       );
     }
+
     const numerator = amount.minorUnits * this.scaledRate * pow10(this.quote.minorUnits);
     const denominator = pow10(ExchangeRate.SCALE) * pow10(this.base.minorUnits);
+
     return Money.ofMinorUnits(divideRounded(numerator, denominator, rounding), this.quote);
   }
 

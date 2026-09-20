@@ -135,6 +135,7 @@ export class Program {
 
   static create(input: { id: string; creditLimit: Money; at: Date }): Program {
     Program.assertValidCreditLimit(input.creditLimit);
+
     return new Program(
       input.id,
       input.creditLimit.currency,
@@ -150,11 +151,13 @@ export class Program {
   }
 
   static rehydrate(memento: ProgramMemento): Program {
-    const currency = Currency.of(memento.currency);
+    const currency = Currency.parse(memento.currency);
     const reservations = new Map<string, Reservation>();
+
     for (const entry of memento.reservations) {
       reservations.set(entry.invoiceId, Reservation.rehydrate(toReservationProps(entry, currency)));
     }
+
     return new Program(
       memento.id,
       currency,
@@ -220,11 +223,13 @@ export class Program {
 
   get activeReservationCount(): number {
     let count = 0;
+
     for (const reservation of this.reservations.values()) {
       if (reservation.isActive) {
         count += 1;
       }
     }
+
     return count;
   }
 
@@ -264,6 +269,7 @@ export class Program {
       if (existing.invoiceAmount.equals(input.invoiceAmount)) {
         return { reservation: existing, created: false };
       }
+
       throw new ReservationConflictError(
         this.id,
         input.invoiceId,
@@ -288,9 +294,11 @@ export class Program {
       exchangeRate: input.exchangeRate,
       at: input.at,
     });
+
     this.reservations.set(reservation.invoiceId, reservation);
     this.reservedTotalValue = this.reservedTotalValue.add(reservedAmount);
     this.touch(input.at);
+
     return { reservation, created: true };
   }
 
@@ -303,10 +311,12 @@ export class Program {
     if (!existing.isActive) {
       return { reservation: existing, released: false };
     }
+
     const released = existing.release(input.at);
     this.reservations.set(released.invoiceId, released);
     this.reservedTotalValue = this.reservedTotalValue.subtract(released.reservedAmount);
     this.touch(input.at);
+
     return { reservation: released, released: true };
   }
 
@@ -321,6 +331,7 @@ export class Program {
     this.creditLimitValue = change.creditLimit;
     this.lastTreasurySequenceValue = change.sequence;
     this.touch(at);
+
     return 'APPLIED';
   }
 
@@ -355,6 +366,7 @@ export class Program {
       if (next.has(entry.invoiceId)) {
         continue;
       }
+
       const local = this.reservations.get(entry.invoiceId);
       if (local === undefined) {
         next.set(
@@ -392,16 +404,19 @@ export class Program {
     this.lastTreasurySequenceValue = snapshot.sequence;
     this.lastReconciledAtValue = snapshot.asOf;
     this.touch(at);
+
     return { outcome: 'APPLIED', ...counters };
   }
 
   private sumActiveReservations(): Money {
     let total = Money.zero(this.currency);
+
     for (const reservation of this.reservations.values()) {
       if (reservation.isActive) {
         total = total.add(reservation.reservedAmount);
       }
     }
+
     return total;
   }
 
@@ -411,6 +426,7 @@ export class Program {
 
   private assertValidSnapshotEntries(entries: readonly TreasurySnapshotReservation[]): void {
     const seen = new Set<string>();
+
     for (const entry of entries) {
       if (seen.has(entry.invoiceId)) {
         throw new InvalidTreasurySnapshotError(
@@ -418,7 +434,9 @@ export class Program {
           `invoice "${entry.invoiceId}" appears more than once`,
         );
       }
+
       seen.add(entry.invoiceId);
+
       this.assertProgramCurrency(
         entry.reservedAmount,
         `Reserved amount of invoice "${entry.invoiceId}"`,
@@ -477,7 +495,8 @@ function toReservationProps(
   memento: ReservationMemento,
   programCurrency: Currency,
 ): ReservationProps {
-  const invoiceCurrency = Currency.of(memento.invoiceCurrency);
+  const invoiceCurrency = Currency.parse(memento.invoiceCurrency);
+
   return {
     invoiceId: memento.invoiceId,
     invoiceAmount: Money.parse(memento.invoiceAmount, invoiceCurrency),

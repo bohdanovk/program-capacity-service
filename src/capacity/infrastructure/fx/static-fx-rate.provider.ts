@@ -18,14 +18,16 @@ export class StaticFxRateProvider implements FxRateProvider {
 
   constructor(rates: readonly StaticFxRate[]) {
     for (const entry of rates) {
-      const base = Currency.of(entry.base);
-      const quote = Currency.of(entry.quote);
+      const base = Currency.parse(entry.base);
+      const quote = Currency.parse(entry.quote);
+
       this.rates.set(pairKey(base, quote), ExchangeRate.parse(base, quote, entry.rate));
     }
   }
 
   getRate(base: Currency, quote: Currency): Promise<ExchangeRate> {
     const rate = this.rates.get(pairKey(base, quote));
+
     return rate === undefined
       ? Promise.reject(new UnsupportedCurrencyPairError(base.code, quote.code))
       : Promise.resolve(rate);
