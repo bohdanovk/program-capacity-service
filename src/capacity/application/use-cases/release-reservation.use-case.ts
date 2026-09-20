@@ -20,9 +20,11 @@ export class ReleaseReservationUseCase {
     return withConcurrencyRetry(async () => {
       const program = await requireProgram(this.programs, command.programId);
       const result = program.release({ invoiceId: command.invoiceId, at: this.clock.now() });
+
       if (result.released) {
         await this.programs.save(program);
       }
+
       return toReservationView(program.id, result.reservation);
     });
   }

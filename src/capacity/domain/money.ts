@@ -26,6 +26,7 @@ export class Money {
     if (minorUnits === null) {
       throw new InvalidMoneyAmountError(amount, currency.code);
     }
+
     return new Money(minorUnits, currency);
   }
 
@@ -47,16 +48,19 @@ export class Money {
 
   add(other: Money): Money {
     this.assertSameCurrency(other, 'add');
+
     return new Money(this.minorUnits + other.minorUnits, this.currency);
   }
 
   subtract(other: Money): Money {
     this.assertSameCurrency(other, 'subtract');
+
     return new Money(this.minorUnits - other.minorUnits, this.currency);
   }
 
   isGreaterThan(other: Money): boolean {
     this.assertSameCurrency(other, 'compare');
+
     return this.minorUnits > other.minorUnits;
   }
 

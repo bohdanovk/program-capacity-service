@@ -33,6 +33,7 @@ export class ApiKeyGuard implements CanActivate {
     if (context.getType() !== 'http') {
       return true;
     }
+
     const targets = [context.getHandler(), context.getClass()];
     if (this.reflector.getAllAndOverride<boolean | undefined>(IS_PUBLIC_KEY, targets) === true) {
       return true;
@@ -55,6 +56,7 @@ export class ApiKeyGuard implements CanActivate {
     }
 
     request.principal = principal;
+
     return true;
   }
 }

@@ -22,15 +22,18 @@ export class CreateProgramUseCase {
 
   async execute(command: CreateProgramCommand): Promise<ProgramCapacityView> {
     const creditLimit = parseMoneyInput(command.creditLimit);
+
     if ((await this.programs.findById(command.programId)) !== null) {
       throw new ProgramAlreadyExistsError(command.programId);
     }
+
     const program = Program.create({
       id: command.programId,
       creditLimit,
       at: this.clock.now(),
     });
     await this.programs.save(program);
+
     return toProgramCapacityView(program);
   }
 }

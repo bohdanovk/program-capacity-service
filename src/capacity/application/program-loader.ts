@@ -7,8 +7,10 @@ export async function requireProgram(
   programId: string,
 ): Promise<Program> {
   const program = await programs.findById(programId);
+
   if (program === null) {
     throw new ProgramNotFoundError(programId);
   }
+
   return program;
 }

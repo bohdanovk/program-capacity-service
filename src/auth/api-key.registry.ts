@@ -29,11 +29,13 @@ export class ApiKeyRegistry {
   authenticate(presentedKey: string): Principal | null {
     const presented = digest(presentedKey);
     let match: Principal | null = null;
+
     for (const registered of this.keys) {
       if (timingSafeEqual(presented, registered.digest)) {
         match = registered.principal;
       }
     }
+
     return match;
   }
 }
@@ -45,6 +47,7 @@ function toScope(keyName: string): (scope: string) => Scope {
         `API key "${keyName}" has unknown scope "${scope}" (allowed: ${Object.values(Scope).join(', ')})`,
       );
     }
+
     return scope;
   };
 }

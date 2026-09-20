@@ -39,6 +39,7 @@ export class AllExceptionsFilter implements ExceptionFilter {
       this.logger.error('Unhandled non-HTTP exception', errorStack(exception));
       return;
     }
+
     const http = host.switchToHttp();
     const request = http.getRequest<Request>();
     const response = http.getResponse<Response>();
@@ -60,6 +61,7 @@ export class AllExceptionsFilter implements ExceptionFilter {
     } else {
       this.logger.debug(summary);
     }
+
     response.status(problem.status).json(body);
   }
 }
@@ -73,9 +75,11 @@ function describe(exception: unknown): Problem {
       details: { ...exception.details },
     };
   }
+
   if (exception instanceof HttpException) {
     return describeHttpException(exception);
   }
+
   return {
     status: HttpStatus.INTERNAL_SERVER_ERROR,
     code: 'INTERNAL_ERROR',
@@ -87,9 +91,11 @@ function describeHttpException(exception: HttpException): Problem {
   const status = exception.getStatus();
   const code = codeForStatus(status);
   const payload = exception.getResponse();
+
   if (typeof payload === 'string') {
     return { status, code, message: payload };
   }
+
   const message: unknown = (payload as { message?: unknown }).message;
   if (Array.isArray(message)) {
     // class-validator reports one line per violated constraint.
@@ -100,11 +106,13 @@ function describeHttpException(exception: HttpException): Problem {
       details: { violations: message },
     };
   }
+
   return { status, code, message: typeof message === 'string' ? message : exception.message };
 }
 
 function codeForStatus(status: number): string {
   const name = (HttpStatus as Record<number, string | undefined>)[status];
+
   return name ?? 'HTTP_ERROR';
 }
 

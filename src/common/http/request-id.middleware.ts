@@ -13,6 +13,8 @@ export function requestIdMiddleware(
   const incoming = request.header(REQUEST_ID_HEADER);
   const requestId =
     incoming !== undefined && SAFE_REQUEST_ID.test(incoming) ? incoming : randomUUID();
+
   response.setHeader(REQUEST_ID_HEADER, requestId);
+
   next();
 }

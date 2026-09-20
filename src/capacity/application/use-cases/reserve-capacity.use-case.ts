@@ -39,9 +39,11 @@ export class ReserveCapacityUseCase {
         exchangeRate,
         at: this.clock.now(),
       });
+
       if (result.created) {
         await this.programs.save(program);
       }
+
       return {
         reservation: toReservationView(program.id, result.reservation),
         created: result.created,
@@ -53,6 +55,7 @@ export class ReserveCapacityUseCase {
     if (invoiceCurrency.equals(programCurrency)) {
       return Promise.resolve(ExchangeRate.identity(programCurrency));
     }
+
     return this.fxRates.getRate(invoiceCurrency, programCurrency);
   }
 }
