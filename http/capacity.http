@@ -1,0 +1,98 @@
+# Program Capacity Service: request collection for the VS Code REST Client and the JetBrains
+# HTTP Client. Uses the development default keys (see README, "Configuration"). Run the
+# service with `npm run start:dev`, then send the requests top to bottom.
+
+@host = http://localhost:3000
+@adminKey = dev-admin-key-0123456789
+@readerKey = dev-reader-key-0123456789
+@programId = PRG-100
+
+### Health (no key needed)
+GET {{host}}/health
+
+### Create a program with a USD 10,000,000 limit
+POST {{host}}/api/v1/programs
+x-api-key: {{adminKey}}
+content-type: application/json
+
+{
+  "programId": "{{programId}}",
+  "creditLimit": { "amount": "10000000.00", "currency": "USD" }
+}
+
+### Current capacity
+GET {{host}}/api/v1/programs/{{programId}}
+x-api-key: {{readerKey}}
+
+### List programs, two per page (follow nextCursor with ?cursor=)
+GET {{host}}/api/v1/programs?limit=2
+x-api-key: {{readerKey}}
+
+### Reserve capacity for a EUR invoice: 201; send again for a 200 idempotent replay
+POST {{host}}/api/v1/programs/{{programId}}/reservations
+x-api-key: {{adminKey}}
+content-type: application/json
+
+{
+  "invoiceId": "INV-1",
+  "invoiceAmount": { "amount": "250000.00", "currency": "EUR" }
+}
+
+### Same invoice, different amount: 409 RESERVATION_CONFLICT
+POST {{host}}/api/v1/programs/{{programId}}/reservations
+x-api-key: {{adminKey}}
+content-type: application/json
+
+{
+  "invoiceId": "INV-1",
+  "invoiceAmount": { "amount": "250000.01", "currency": "EUR" }
+}
+
+### More than is available: 409 INSUFFICIENT_CAPACITY
+POST {{host}}/api/v1/programs/{{programId}}/reservations
+x-api-key: {{adminKey}}
+content-type: application/json
+
+{
+  "invoiceId": "INV-2",
+  "invoiceAmount": { "amount": "99999999.00", "currency": "USD" }
+}
+
+### Too many fraction digits for USD: 400 INVALID_AMOUNT (rejected, never rounded)
+POST {{host}}/api/v1/programs/{{programId}}/reservations
+x-api-key: {{adminKey}}
+content-type: application/json
+
+{
+  "invoiceId": "INV-3",
+  "invoiceAmount": { "amount": "10.005", "currency": "USD" }
+}
+
+### No configured rate for the pair: 422 UNSUPPORTED_CURRENCY_PAIR
+POST {{host}}/api/v1/programs/{{programId}}/reservations
+x-api-key: {{adminKey}}
+content-type: application/json
+
+{
+  "invoiceId": "INV-4",
+  "invoiceAmount": { "amount": "100.00", "currency": "CHF" }
+}
+
+### Active reservations of the program, paginated
+GET {{host}}/api/v1/programs/{{programId}}/reservations?status=ACTIVE&limit=50
+x-api-key: {{readerKey}}
+
+### One reservation
+GET {{host}}/api/v1/programs/{{programId}}/reservations/INV-1
+x-api-key: {{readerKey}}
+
+### Invoice repaid: release (idempotent; send twice)
+POST {{host}}/api/v1/programs/{{programId}}/reservations/INV-1/release
+x-api-key: {{adminKey}}
+
+### Read-only key on a write endpoint: 403 FORBIDDEN
+POST {{host}}/api/v1/programs/{{programId}}/reservations/INV-1/release
+x-api-key: {{readerKey}}
+
+### No key: 401 UNAUTHORIZED
+GET {{host}}/api/v1/programs

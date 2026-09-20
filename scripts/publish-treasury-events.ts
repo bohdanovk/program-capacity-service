@@ -1,16 +1,25 @@
 /**
  * Publishes a small, self-explanatory scenario to the treasury topic so the consumer can be
- * watched end to end:  npm run kafka:publish [programId]
+ * watched end to end:
+ *
+ *   npm run kafka:publish -- [programId] [--with-poison]
+ *
+ * The default scenario is clean: limit set, snapshot, limit raised, and one out-of-order
+ * duplicate that the service logs as STALE. `--with-poison` adds a malformed message, which
+ * the service logs at ERROR level and drops; that message stays in the topic and is reported
+ * again by every new consumer group that replays it, so only send it on purpose.
  *
  * Sequence numbers restart at 1 each run; the service ignores anything at or below the last
  * applied sequence, so re-running against a live instance logs STALE for the first messages.
- * Use a fresh programId (argument) to see the full path again.
+ * Use a fresh programId to see the full path again.
  */
 import { Kafka, Partitioners, logLevel } from 'kafkajs';
 
 const TOPIC = 'treasury.program-capacity.v1';
 const brokers = (process.env.KAFKA_BROKERS ?? 'localhost:9092').split(',');
-const programId = process.argv[2] ?? 'PRG-001';
+const args = process.argv.slice(2);
+const withPoison = args.includes('--with-poison');
+const programId = args.find((arg) => !arg.startsWith('--')) ?? 'PRG-001';
 const asOf = new Date().toISOString();
 
 const messages: { label: string; value: Record<string, unknown> }[] = [
@@ -72,7 +81,10 @@ const messages: { label: string; value: Record<string, unknown> }[] = [
       creditLimit: '1.00',
     },
   },
-  {
+];
+
+if (withPoison) {
+  messages.push({
     label: 'malformed message (float amount) -> expected to be dropped as poison',
     value: {
       type: 'ProgramLimitChanged',
@@ -82,8 +94,8 @@ const messages: { label: string; value: Record<string, unknown> }[] = [
       currency: 'USD',
       creditLimit: 1.5,
     },
-  },
-];
+  });
+}
 
 async function main(): Promise<void> {
   const kafka = new Kafka({ clientId: 'treasury-simulator', brokers, logLevel: logLevel.NOTHING });

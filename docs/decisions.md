@@ -113,3 +113,40 @@ concurrency guarantee through the real repository, and the Kafka wire contract. 
 suite proves authentication, the error envelope and the reservation lifecycle over HTTP.
 Controllers, mappers and modules are not unit-tested on their own; they are exercised by
 the e2e suite, and testing them in isolation would only restate their code.
+
+## 15. One dependency override, and why
+
+Nest 11's `@nestjs/platform-express` pins `multer` 2.2.0, which carries four denial-of-service
+advisories fixed in multer 2.3.0. `package.json` overrides `multer` to 2.4.0, the release
+Nest 12 ships with, so `npm audit` is clean without a framework major upgrade. The service
+has no multipart endpoints, so none of the affected code was reachable; the override exists
+so the audit reports the truth and nobody has to re-derive that every time.
+
+## 16. Configuration is a schema, not a template file
+
+There is no `.env.example`. The contract is the `EnvironmentVariables` class: types,
+constraints, defaults and documentation in one place, enforced when the process starts. A
+template file drifts from the code and cannot enforce anything; the schema fails the start
+with the names of the offending variables. Development gets built-in API keys and FX rates
+(and logs that it did) so a clone runs with `npm run start:dev` alone; test and production
+must set them, which is the point.
+
+## 17. Keyset pagination for every list
+
+Nothing loads a whole collection: the repository port has `findPage`, not `findAll`. Pages
+are keyset (cursor) based rather than offset based because a keyset query costs the same
+on page 1 and page 1000 and stays consistent while rows are inserted, and because it maps
+directly onto `WHERE key > :cursor ORDER BY key LIMIT :n + 1` in SQL. The cursor is opaque
+and tagged with the list it belongs to, so a cursor from one endpoint is rejected by
+another. The mechanism is one shared module used by both the in-memory repository and the
+reservation query; a database adapter replaces the in-memory helper with the equivalent
+query and the HTTP contract does not change. Reservations are currently paged inside the
+loaded aggregate, which is the known scaling limit of the in-memory design (decision 4).
+
+## 18. The currency registry is the type
+
+Supported currencies live in one `as const` object. The `CurrencyCode` union and the set of
+legal decimal scales are derived from it, so `Currency.of('XYZ')` or a scale of 7 is a
+compile-time error. Untrusted input goes through `Currency.parse`, which matches exactly:
+lower case or padded codes are rejected rather than normalised, because a payments API
+should not guess what a caller meant.

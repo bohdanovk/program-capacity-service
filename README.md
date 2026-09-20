@@ -15,24 +15,30 @@ Stack: TypeScript 5.9, Nest.js 11, Jest, kafkajs via `@nestjs/microservices`, Op
 Prerequisites: Node 22+, npm, Docker (only for Kafka).
 
 ```bash
-# todo: go away from .env.example, let use something like env schema instead of to enforce setting needed variables
-cp .env.example .env
 npm install
-npm run kafka:up        # broker + topic, via docker compose
 npm run start:dev       # API on :3000, OpenAPI UI on /docs
 ```
 
-[//]: # "todo: I do not like that we have this working about other terminal, but let's sede"
+No configuration file is needed. The configuration contract is a schema
+(`src/config/environment.ts`); in development it fills in two dev API keys and a few FX
+rates and says so in the first log line. Anything else, and every value in test or
+production, comes from the environment (a `.env` file is honoured if present). The service
+refuses to start when the environment does not satisfy the schema.
 
-Then, in another terminal, push a sample treasury scenario and look at the result:
+With the treasury feed, everything runs in Docker from one terminal:
 
 ```bash
-npm run kafka:publish   # limit set, snapshot, limit raised, a stale duplicate, a poison message
+docker compose --profile app up --build -d    # broker, topic, and the service on :3000
+npm run kafka:publish                          # limit set, snapshot, limit raised, a stale duplicate
 curl -s localhost:3000/api/v1/programs/PRG-001 -H 'x-api-key: local-admin-key-0123456789'
+docker compose --profile app logs app          # CREATED, APPLIED, APPLIED, STALE
 ```
 
-Without Kafka: set `KAFKA_ENABLED=false` in `.env` and create programs through the API.
-Fully containerised: `docker compose --profile app up --build`.
+For the feed against a locally running service instead: `npm run kafka:up`, then start with
+`KAFKA_ENABLED=true npm run start:dev`. `npm run kafka:publish -- PRG-002 --with-poison` adds
+a malformed message to show the poison-message path (logged at ERROR level and dropped; it
+stays in the topic, so every new consumer group replays and reports it). `npm run kafka:down`
+removes the broker and its data.
 
 Everything at once (format check, lint with architecture rules, type check, unit and e2e tests):
 
@@ -42,14 +48,14 @@ npm run check
 
 ## Walkthrough
 
-The default `.env.example` defines two keys: `local-admin-key-0123456789` (read and write) and
-`local-reader-key-0123456789` (read only).
-
-[//]: # 'todo: we need to also create .http files to run those tests for bettere usability'
+In development two keys exist by default: `dev-admin-key-0123456789` (read and write) and
+`dev-reader-key-0123456789` (read only). The same requests are in
+[http/capacity.http](http/capacity.http) for the VS Code REST Client or the JetBrains HTTP
+Client, which is the quickest way to click through the API.
 
 ```bash
 API=localhost:3000/api/v1
-KEY='x-api-key: local-admin-key-0123456789'
+KEY='x-api-key: dev-admin-key-0123456789'
 JSON='content-type: application/json'
 
 # 1. Create a program with a USD 10,000,000 limit (or let treasury announce it over Kafka)
@@ -109,7 +115,13 @@ unknown program or reservation, 409 state conflicts (`INSUFFICIENT_CAPACITY`,
 is well-formed but cannot be processed (`UNSUPPORTED_CURRENCY_PAIR`).
 
 Amounts are always `{ "amount": "1234.56", "currency": "USD" }` with the amount as a decimal
-string. Floats are rejected on the way in and never produced on the way out.
+string and the currency an exact upper-case ISO 4217 code. Floats are rejected on the way in
+and never produced on the way out.
+
+Lists are keyset-paginated, the same way everywhere: `?limit=` (1 to 200, default 50) and an
+opaque `?cursor=`. A page is `{ "items": [...], "nextCursor": "..." | null, "limit": n }`;
+pass `nextCursor` back until it is null. A cursor from another list or from elsewhere is a 400
+`INVALID_CURSOR`. Nothing in the service ever loads a whole collection.
 
 ## Architecture
 
@@ -183,6 +195,9 @@ those two are the point here (see decision 12).
 
 - **Money** is a `bigint` of minor units plus an ISO 4217 currency. `"10.005"` in USD is a
   400, not a rounding. Amounts far beyond `Number.MAX_SAFE_INTEGER` are handled exactly.
+  The currency registry is one typed object: the code union and the set of legal decimal
+  scales (0, 2, 3 for currencies, 10 for rates) are derived from it, and input is matched
+  exactly (`"usd"` is rejected, not repaired).
 - **FX conversion** uses the configured rate at 10 decimal places and rounds the result
   **up** to the program currency's minor unit, so a reservation never consumes less than the
   invoice is worth. Only explicitly configured pairs are served; nothing is inverted or
@@ -207,7 +222,11 @@ those two are the point here (see decision 12).
 
 ## Configuration
 
-All values are validated at start-up; a misconfigured service does not start.
+`src/config/environment.ts` is the contract: every variable with its type, constraints and
+default, validated at start-up. There is no template file to copy; a misconfigured service
+does not start, and the error names each offending variable. In development, `API_KEYS` and
+`FX_RATES` fall back to built-in values (logged at start-up) so a fresh clone runs unchanged.
+Test and production must set them.
 
 | Variable          | Default                    | Meaning                                                                                                      |
 | ----------------- | -------------------------- | ------------------------------------------------------------------------------------------------------------ |
@@ -265,6 +284,8 @@ The short list; each has a fuller record in [docs/decisions.md](docs/decisions.m
 6. Poison messages are dropped and logged rather than sent to a dead-letter topic; the
    decision point is one filter.
 7. Nest 11 and TypeScript 5.9 rather than the versions released in the last few weeks.
+8. `multer` is overridden to 2.4.0 (Nest 11 pins a version with DoS advisories; this service
+   has no file uploads). `npm audit` is clean.
 
 ## What production would add next
 
