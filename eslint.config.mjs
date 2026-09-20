@@ -175,6 +175,7 @@ export default tseslint.config(
       // supertest response bodies are untyped by design; assertions on them are the point.
       '@typescript-eslint/no-unsafe-argument': 'off',
       '@typescript-eslint/no-unsafe-assignment': 'off',
+      '@typescript-eslint/no-unsafe-call': 'off',
       '@typescript-eslint/no-unsafe-member-access': 'off',
     },
   },

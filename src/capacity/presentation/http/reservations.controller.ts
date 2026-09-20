@@ -27,6 +27,7 @@ import { API_KEY_SECURITY_SCHEME } from '../../../auth/api-key.constants';
 import { RequireScopes } from '../../../auth/decorators/require-scopes.decorator';
 import { Scope } from '../../../auth/scope';
 import { ErrorResponseDto } from '../../../common/http/error-response.dto';
+import { toPageRequest } from '../../../common/http/pagination.dto';
 import { ProgramQueries } from '../../application/queries/program-queries';
 import { ReleaseReservationUseCase } from '../../application/use-cases/release-reservation.use-case';
 import { ReserveCapacityUseCase } from '../../application/use-cases/reserve-capacity.use-case';
@@ -35,7 +36,7 @@ import {
   ProgramIdParamsDto,
   ReservationParamsDto,
 } from './dto/params.dto';
-import { ReservationDto } from './dto/reservation.dto';
+import { ReservationDto, ReservationPageDto } from './dto/reservation.dto';
 import { ReserveCapacityDto } from './dto/reserve-capacity.dto';
 
 @ApiTags('Reservations')
@@ -56,13 +57,14 @@ export class ReservationsController {
 
   @Get()
   @RequireScopes(Scope.Read)
-  @ApiOperation({ summary: 'List reservations of a program, oldest first' })
-  @ApiOkResponse({ type: [ReservationDto] })
+  @ApiOperation({ summary: 'List reservations of a program, oldest first, one page at a time' })
+  @ApiOkResponse({ type: ReservationPageDto })
+  @ApiBadRequestResponse({ type: ErrorResponseDto, description: 'Invalid limit or cursor' })
   list(
     @Param() params: ProgramIdParamsDto,
     @Query() query: ListReservationsQueryDto,
-  ): Promise<ReservationDto[]> {
-    return this.queries.listReservations(params.programId, query.status);
+  ): Promise<ReservationPageDto> {
+    return this.queries.listReservations(params.programId, toPageRequest(query), query.status);
   }
 
   @Post()

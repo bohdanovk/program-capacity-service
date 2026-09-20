@@ -59,6 +59,55 @@ describe('Capacity API (e2e)', () => {
     });
   });
 
+  describe('pagination', () => {
+    it('pages through programs with an opaque cursor and rejects bad input', async () => {
+      // Created out of order on purpose: pages are ordered by id, not by insertion.
+      for (const programId of ['PRG-PAGE-B', 'PRG-PAGE-C', 'PRG-PAGE-A']) {
+        await http
+          .post('/api/v1/programs')
+          .set('x-api-key', ADMIN_KEY)
+          .send({ programId, creditLimit: { amount: '1.00', currency: 'USD' } })
+          .expect(201);
+      }
+
+      const first = await http
+        .get('/api/v1/programs')
+        .query({ limit: 2 })
+        .set('x-api-key', READER_KEY)
+        .expect(200);
+      expect(first.body.items.map((p: { programId: string }) => p.programId)).toEqual([
+        'PRG-PAGE-A',
+        'PRG-PAGE-B',
+      ]);
+      expect(first.body.limit).toBe(2);
+      expect(first.body.nextCursor).toEqual(expect.any(String));
+
+      const second = await http
+        .get('/api/v1/programs')
+        .query({ limit: 2, cursor: first.body.nextCursor })
+        .set('x-api-key', READER_KEY)
+        .expect(200);
+      expect(second.body.items.map((p: { programId: string }) => p.programId)).toEqual([
+        'PRG-PAGE-C',
+      ]);
+      expect(second.body.nextCursor).toBeNull();
+
+      const badCursor = await http
+        .get('/api/v1/programs')
+        .query({ cursor: 'not-issued-by-us' })
+        .set('x-api-key', READER_KEY)
+        .expect(400);
+      expect(badCursor.body.code).toBe('INVALID_CURSOR');
+
+      const badLimit = await http
+        .get('/api/v1/programs')
+        .query({ limit: 0 })
+        .set('x-api-key', READER_KEY)
+        .expect(400);
+      expect(badLimit.body.code).toBe('VALIDATION_FAILED');
+    });
+  });
+
   describe('reservation lifecycle', () => {
     const programId = 'PRG-E2E';
     it('creates a program with the whole limit available', async () => {
@@ -210,7 +259,8 @@ describe('Capacity API (e2e)', () => {
         .query({ status: 'RELEASED' })
         .set('x-api-key', READER_KEY)
         .expect(200);
-      expect(list.body).toHaveLength(1);
+      expect(list.body.items).toHaveLength(1);
+      expect(list.body.nextCursor).toBeNull();
 
       const unknown = await http
         .post(`/api/v1/programs/${programId}/reservations/INV-NOPE/release`)

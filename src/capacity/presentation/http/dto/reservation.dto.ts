@@ -1,4 +1,5 @@
 import { ApiProperty } from '@nestjs/swagger';
+import { PageDtoOf } from '../../../../common/http/pagination.dto';
 import { ReservationStatus } from '../../../domain/reservation';
 import { MoneyDto } from './money.dto';
 
@@ -36,3 +37,5 @@ export class ReservationDto {
   @ApiProperty({ example: '2026-09-19T10:15:30.000Z' })
   updatedAt!: string;
 }
+
+export class ReservationPageDto extends PageDtoOf(ReservationDto, 'ReservationPage') {}

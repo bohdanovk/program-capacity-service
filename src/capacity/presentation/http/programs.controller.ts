@@ -1,4 +1,4 @@
-import { Body, Controller, Get, HttpCode, HttpStatus, Param, Post } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, HttpStatus, Param, Post, Query } from '@nestjs/common';
 import {
   ApiBadRequestResponse,
   ApiConflictResponse,
@@ -15,11 +15,12 @@ import { API_KEY_SECURITY_SCHEME } from '../../../auth/api-key.constants';
 import { RequireScopes } from '../../../auth/decorators/require-scopes.decorator';
 import { Scope } from '../../../auth/scope';
 import { ErrorResponseDto } from '../../../common/http/error-response.dto';
+import { PageQueryDto, toPageRequest } from '../../../common/http/pagination.dto';
 import { ProgramQueries } from '../../application/queries/program-queries';
 import { CreateProgramUseCase } from '../../application/use-cases/create-program.use-case';
 import { CreateProgramDto } from './dto/create-program.dto';
 import { ProgramIdParamsDto } from './dto/params.dto';
-import { ProgramCapacityDto } from './dto/program-capacity.dto';
+import { ProgramCapacityDto, ProgramCapacityPageDto } from './dto/program-capacity.dto';
 
 @ApiTags('Programs')
 @ApiSecurity(API_KEY_SECURITY_SCHEME)
@@ -34,10 +35,11 @@ export class ProgramsController {
 
   @Get()
   @RequireScopes(Scope.Read)
-  @ApiOperation({ summary: 'List programs with their current capacity' })
-  @ApiOkResponse({ type: [ProgramCapacityDto] })
-  list(): Promise<ProgramCapacityDto[]> {
-    return this.queries.listPrograms();
+  @ApiOperation({ summary: 'List programs with their current capacity, one page at a time' })
+  @ApiOkResponse({ type: ProgramCapacityPageDto })
+  @ApiBadRequestResponse({ type: ErrorResponseDto, description: 'Invalid limit or cursor' })
+  list(@Query() query: PageQueryDto): Promise<ProgramCapacityPageDto> {
+    return this.queries.listPrograms(toPageRequest(query));
   }
 
   @Post()

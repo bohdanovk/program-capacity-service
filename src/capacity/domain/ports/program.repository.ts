@@ -1,3 +1,4 @@
+import { Page, PageRequest } from '../../../shared/pagination/pagination';
 import { Program } from '../program';
 
 export const PROGRAM_REPOSITORY = Symbol('PROGRAM_REPOSITORY');
@@ -8,7 +9,11 @@ export const PROGRAM_REPOSITORY = Symbol('PROGRAM_REPOSITORY');
  */
 export interface ProgramRepository {
   findById(programId: string): Promise<Program | null>;
-  findAll(): Promise<Program[]>;
+  /**
+   * Programs ordered by id, one page at a time (keyset: `WHERE id > :cursor ORDER BY id`).
+   * Nothing in the service loads every program at once.
+   */
+  findPage(request: PageRequest): Promise<Page<Program>>;
   /**
    * Inserts (version 0) or updates the aggregate and bumps the stored version.
    * @throws ConcurrencyConflictError when the stored version differs from `program.version`,

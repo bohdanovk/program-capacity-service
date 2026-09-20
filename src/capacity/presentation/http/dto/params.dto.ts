@@ -1,5 +1,6 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { IsEnum, IsOptional, IsString, Matches } from 'class-validator';
+import { PageQueryDto } from '../../../../common/http/pagination.dto';
 import { IDENTIFIER_PATTERN } from '../../../../common/validation/patterns';
 import { ReservationStatus } from '../../../domain/reservation';
 
@@ -17,7 +18,7 @@ export class ReservationParamsDto extends ProgramIdParamsDto {
   invoiceId!: string;
 }
 
-export class ListReservationsQueryDto {
+export class ListReservationsQueryDto extends PageQueryDto {
   @ApiPropertyOptional({ enum: ReservationStatus, description: 'Filter by reservation status' })
   @IsOptional()
   @IsEnum(ReservationStatus)
