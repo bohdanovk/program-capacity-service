@@ -191,7 +191,7 @@ types, exhaustive switches, `no-floating-promises` as an error, Prettier for for
 Why ESLint and not Biome: Biome has neither type-aware rules nor an architecture plugin, and
 those two are the point here (see decision 12).
 
-## Domain semantics, precisely
+## Domain semantics
 
 - **Money** is a `bigint` of minor units plus an ISO 4217 currency. `"10.005"` in USD is a
   400, not a rounding. Amounts far beyond `Number.MAX_SAFE_INTEGER` are handled exactly.
@@ -243,8 +243,6 @@ Test and production must set them.
 The topic name `treasury.program-capacity.v1` is part of the contract and therefore a constant.
 
 ## Tests
-
-Tests sit where a mistake would cost money, and nowhere else.
 
 | Suite                                               | What it proves                                                                                                                            |
 | --------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
