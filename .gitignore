@@ -1,0 +1,20 @@
+# build output
+dist/
+coverage/
+
+# dependencies
+node_modules/
+
+# environment
+.env
+.env.local
+
+# tooling
+*.tsbuildinfo
+.eslintcache
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/
+*.log
