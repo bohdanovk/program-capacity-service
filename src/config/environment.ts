@@ -10,20 +10,28 @@ import {
   Min,
   validateSync,
 } from 'class-validator';
+import { coerceBoolean, coerceInteger } from '../shared/transform/coercion';
 import type { Environment } from './app-config';
 
-// todo: maybe move toBoolean and toInteger to shared
-const toBoolean = ({ value }: { value: unknown }): unknown =>
-  value === 'true' ? true : value === 'false' ? false : value;
-const toInteger = ({ value }: { value: unknown }): unknown =>
-  typeof value === 'string' && /^\d+$/.test(value) ? Number(value) : value;
+/**
+ * Values assumed in development when the variable is absent, so a fresh clone runs with
+ * `npm run start:dev` and nothing else. Test and production must set them explicitly.
+ */
+export const DEVELOPMENT_DEFAULTS: Readonly<Record<string, string>> = {
+  API_KEYS:
+    'dev-admin:dev-admin-key-0123456789:read+write,dev-reader:dev-reader-key-0123456789:read',
+  FX_RATES: 'EUR/USD=1.0850,GBP/USD=1.2700,USD/EUR=0.9217,JPY/USD=0.0066889632',
+};
 
-/** Raw environment contract. Defaults are development defaults; production must set everything explicitly. */
+/**
+ * The configuration contract. Every variable, its type, its constraints and its default live
+ * here and nowhere else; the service refuses to start when the environment does not satisfy it.
+ */
 export class EnvironmentVariables {
   @IsIn(['development', 'test', 'production'])
   NODE_ENV: Environment = 'development';
 
-  @Transform(toInteger)
+  @Transform(({ value }) => coerceInteger(value))
   @IsInt()
   @Min(1)
   @Max(65535)
@@ -39,7 +47,7 @@ export class EnvironmentVariables {
   @IsString()
   FX_RATES = '';
 
-  @Transform(toBoolean)
+  @Transform(({ value }) => coerceBoolean(value))
   @IsBoolean()
   KAFKA_ENABLED = false;
 
@@ -55,13 +63,20 @@ export class EnvironmentVariables {
   @IsNotEmpty()
   KAFKA_GROUP_ID = 'program-capacity-service';
 
-  @Transform(toBoolean)
+  @Transform(({ value }) => coerceBoolean(value))
   @IsBoolean()
   SWAGGER_ENABLED = true;
 }
 
-export function validateEnvironment(raw: Record<string, unknown>): EnvironmentVariables {
-  const env = plainToInstance(EnvironmentVariables, raw, { exposeDefaultValues: true });
+export interface ValidatedEnvironment {
+  readonly env: EnvironmentVariables;
+  /** Names of variables filled from {@link DEVELOPMENT_DEFAULTS}; empty outside development. */
+  readonly defaulted: readonly string[];
+}
+
+export function validateEnvironment(raw: Record<string, unknown>): ValidatedEnvironment {
+  const { values, defaulted } = applyDevelopmentDefaults(raw);
+  const env = plainToInstance(EnvironmentVariables, values, { exposeDefaultValues: true });
   const errors = validateSync(env, { whitelist: true, forbidUnknownValues: false });
 
   if (errors.length > 0) {
@@ -72,5 +87,25 @@ export function validateEnvironment(raw: Record<string, unknown>): EnvironmentVa
     throw new Error(`Invalid environment configuration:\n  - ${problems}`);
   }
 
-  return env;
+  return { env, defaulted };
+}
+
+function applyDevelopmentDefaults(raw: Record<string, unknown>): {
+  values: Record<string, unknown>;
+  defaulted: string[];
+} {
+  const isDevelopment = (raw.NODE_ENV ?? 'development') === 'development';
+  const values = { ...raw };
+  const defaulted: string[] = [];
+
+  if (isDevelopment) {
+    for (const [name, value] of Object.entries(DEVELOPMENT_DEFAULTS)) {
+      if (values[name] === undefined || values[name] === '') {
+        values[name] = value;
+        defaulted.push(name);
+      }
+    }
+  }
+
+  return { values, defaulted };
 }

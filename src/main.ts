@@ -29,12 +29,13 @@ async function bootstrap(): Promise<void> {
     logger.warn('Treasury Kafka consumer disabled (KAFKA_ENABLED=false)');
   }
 
-  const port = config.get('port', { infer: true });
-  await app.listen(port);
-  // todo: why do we have localhost here hardcoded
-  logger.log(`HTTP API listening on http://localhost:${port}/${API_PREFIX}`);
+  await app.listen(config.get('port', { infer: true }));
+
+  // The address the server actually bound to, as reported by the HTTP adapter.
+  const url = await app.getUrl();
+  logger.log(`HTTP API listening on ${url}/${API_PREFIX}`);
   if (config.get('swagger.enabled', { infer: true })) {
-    logger.log(`OpenAPI docs at http://localhost:${port}/${OPENAPI_PATH}`);
+    logger.log(`OpenAPI docs at ${url}/${OPENAPI_PATH}`);
   }
 }
 

@@ -1,5 +1,6 @@
+import { Logger } from '@nestjs/common';
 import { ApiKeyConfig, AppConfig, FxRateConfig } from './app-config';
-import { validateEnvironment } from './environment';
+import { DEVELOPMENT_DEFAULTS, validateEnvironment } from './environment';
 
 const MIN_API_KEY_LENGTH = 16;
 const API_KEY_ENTRY = /^([A-Za-z0-9._-]+):([A-Za-z0-9._~-]+):([a-z+]+)$/;
@@ -10,7 +11,14 @@ const FX_RATE_ENTRY = /^([A-Za-z]{3})\/([A-Za-z]{3})=(\d+(?:\.\d+)?)$/;
  * a misconfigured service fails at start-up rather than on the first request.
  */
 export function loadAppConfig(raw: Record<string, unknown> = process.env): AppConfig {
-  const env = validateEnvironment(raw);
+  const { env, defaulted } = validateEnvironment(raw);
+
+  if (defaulted.length > 0) {
+    new Logger('Config').warn(
+      `Development defaults in use for ${defaulted.join(', ')}: ` +
+        defaulted.map((name) => `${name}=${DEVELOPMENT_DEFAULTS[name] ?? ''}`).join(' '),
+    );
+  }
 
   return {
     env: env.NODE_ENV,

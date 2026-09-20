@@ -148,7 +148,7 @@ export default tseslint.config(
                 to: layers(same('application'), same('infrastructure'), same('presentation')),
               },
             },
-            { from: { element: { type: 'config' } }, allow: { to: layers('config') } },
+            { from: { element: { type: 'config' } }, allow: { to: layers('config', 'shared') } },
             { from: { element: { type: 'auth' } }, allow: { to: layers('auth', 'config') } },
             { from: { element: { type: 'common' } }, allow: { to: layers('common', 'shared') } },
             { from: { element: { type: 'health' } }, allow: { to: layers('health', 'auth', 'config') } },
