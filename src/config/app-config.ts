@@ -1,5 +1,9 @@
 export type Environment = 'development' | 'test' | 'production';
 
+/** Nest log levels from least to most severe; a configured level enables itself and everything above. */
+export const LOG_LEVELS = ['verbose', 'debug', 'log', 'warn', 'error', 'fatal'] as const;
+export type LogLevel = (typeof LOG_LEVELS)[number];
+
 export interface ApiKeyConfig {
   /** Human-readable client name, used in logs; never the secret. */
   readonly name: string;
@@ -24,6 +28,7 @@ export interface KafkaConfig {
 export interface AppConfig {
   readonly env: Environment;
   readonly port: number;
+  readonly logLevel: LogLevel;
   readonly auth: { readonly apiKeys: readonly ApiKeyConfig[] };
   readonly fx: { readonly rates: readonly FxRateConfig[] };
   readonly kafka: KafkaConfig;

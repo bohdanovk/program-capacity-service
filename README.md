@@ -124,7 +124,8 @@ pass `nextCursor` back until it is null. A cursor from another list or from else
 `INVALID_CURSOR`. Nothing in the service ever loads a whole collection.
 
 Every response carries the standard security headers (`helmet`, no `X-Powered-By`) and the
-request id.
+request id; every request produces one access-log line with method, path, status, duration,
+client name and request id.
 
 ## Architecture
 
@@ -155,7 +156,7 @@ src/
       kafka/                      treasury consumer, message DTO, acknowledgement policy
     capacity.module.ts            binds ports to adapters
   auth/                           API-key guard, scopes, @Public / @RequireScopes
-  common/                         request id, error envelope, shared validation patterns
+  common/                         request id, access log, error envelope, shared validation patterns
   config/                         typed, validated configuration (fails fast at start-up)
   docs/                           OpenAPI document setup
   health/
@@ -231,17 +232,18 @@ does not start, and the error names each offending variable. In development, `AP
 `FX_RATES` fall back to built-in values (logged at start-up) so a fresh clone runs unchanged.
 Test and production must set them.
 
-| Variable          | Default                    | Meaning                                                                                                      |
-| ----------------- | -------------------------- | ------------------------------------------------------------------------------------------------------------ |
-| `NODE_ENV`        | `development`              | `production` switches logs to JSON                                                                           |
-| `PORT`            | `3000`                     |                                                                                                              |
-| `API_KEYS`        | required                   | `name:secret:scope[+scope]`, comma separated. Secret 16+ chars of `[A-Za-z0-9._~-]`. Scopes `read`, `write`. |
-| `FX_RATES`        | empty                      | `BASE/QUOTE=rate`, comma separated, up to 10 decimals                                                        |
-| `KAFKA_ENABLED`   | `false`                    | Start the treasury consumer                                                                                  |
-| `KAFKA_BROKERS`   | `localhost:9092`           | Comma separated                                                                                              |
-| `KAFKA_CLIENT_ID` | `program-capacity-service` |                                                                                                              |
-| `KAFKA_GROUP_ID`  | `program-capacity-service` | A new group reads the topic from the beginning and rebuilds state                                            |
-| `SWAGGER_ENABLED` | `true`                     | Serve `/docs`                                                                                                |
+| Variable          | Default                           | Meaning                                                                                                      |
+| ----------------- | --------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `NODE_ENV`        | `development`                     | `production` switches logs to JSON                                                                           |
+| `PORT`            | `3000`                            |                                                                                                              |
+| `LOG_LEVEL`       | `log` in production, else `debug` | Least severe level to emit: `verbose`, `debug`, `log`, `warn`, `error`, `fatal`                              |
+| `API_KEYS`        | required                          | `name:secret:scope[+scope]`, comma separated. Secret 16+ chars of `[A-Za-z0-9._~-]`. Scopes `read`, `write`. |
+| `FX_RATES`        | empty                             | `BASE/QUOTE=rate`, comma separated, up to 10 decimals                                                        |
+| `KAFKA_ENABLED`   | `false`                           | Start the treasury consumer                                                                                  |
+| `KAFKA_BROKERS`   | `localhost:9092`                  | Comma separated                                                                                              |
+| `KAFKA_CLIENT_ID` | `program-capacity-service`        |                                                                                                              |
+| `KAFKA_GROUP_ID`  | `program-capacity-service`        | A new group reads the topic from the beginning and rebuilds state                                            |
+| `SWAGGER_ENABLED` | `true`                            | Serve `/docs`                                                                                                |
 
 The topic name `treasury.program-capacity.v1` is part of the contract and therefore a constant.
 
@@ -290,10 +292,13 @@ The short list; each has a fuller record in [docs/decisions.md](docs/decisions.m
 
 ## What production would add next
 
-Database-backed repository (Postgres, `programs` + `reservations`, version column), a
-dead-letter topic for dropped treasury messages, an outbox that publishes this service's
-reservations and releases back to treasury, metrics (reservations per outcome, consumer lag),
-and an identity provider for client credentials.
+Database-backed repository (Postgres, `programs` + `reservations`, version column; the port
+and the version check are already shaped for it), a readiness probe that fails until storage
+and the consumer are up, Kafka credentials and TLS in the consumer options, secrets from a
+secrets manager, metrics (reservations per outcome, treasury messages per outcome, consumer
+lag), a dead-letter topic for dropped treasury messages, an outbox that publishes this
+service's reservations and releases back to treasury, and an identity provider for client
+credentials.
 
 ## Scripts
 

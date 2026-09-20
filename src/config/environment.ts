@@ -11,7 +11,8 @@ import {
   validateSync,
 } from 'class-validator';
 import { coerceBoolean, coerceInteger } from '../shared/transform/coercion';
-import type { Environment } from './app-config';
+import { LOG_LEVELS } from './app-config';
+import type { Environment, LogLevel } from './app-config';
 
 /**
  * Values assumed in development when the variable is absent, so a fresh clone runs with
@@ -36,6 +37,11 @@ export class EnvironmentVariables {
   @Min(1)
   @Max(65535)
   PORT = 3000;
+
+  /** Least severe level to emit. Defaults to `log` in production and `debug` elsewhere. */
+  @IsOptional()
+  @IsIn(LOG_LEVELS)
+  LOG_LEVEL?: LogLevel;
 
   /** `name:secret:scope[+scope]` entries separated by commas, e.g. `ops:0123456789abcdef:read+write`. */
   @IsString()

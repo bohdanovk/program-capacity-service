@@ -1,5 +1,5 @@
 import { Logger } from '@nestjs/common';
-import { ApiKeyConfig, AppConfig, FxRateConfig } from './app-config';
+import { ApiKeyConfig, AppConfig, FxRateConfig, LogLevel } from './app-config';
 import { DEVELOPMENT_DEFAULTS, validateEnvironment } from './environment';
 
 const MIN_API_KEY_LENGTH = 16;
@@ -23,6 +23,7 @@ export function loadAppConfig(raw: Record<string, unknown> = process.env): AppCo
   return {
     env: env.NODE_ENV,
     port: env.PORT,
+    logLevel: env.LOG_LEVEL ?? defaultLogLevel(env.NODE_ENV),
     auth: { apiKeys: parseApiKeys(env.API_KEYS) },
     fx: { rates: parseFxRates(env.FX_RATES) },
     kafka: {
@@ -75,6 +76,10 @@ export function parseFxRates(text: string): FxRateConfig[] {
     const [, base = '', quote = '', rate = ''] = match;
     return { base: base.toUpperCase(), quote: quote.toUpperCase(), rate };
   });
+}
+
+function defaultLogLevel(nodeEnv: string): LogLevel {
+  return nodeEnv === 'production' ? 'log' : 'debug';
 }
 
 function splitList(text: string): string[] {

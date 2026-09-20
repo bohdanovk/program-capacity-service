@@ -5,15 +5,25 @@ import { MicroserviceOptions } from '@nestjs/microservices';
 import { AppModule } from './app.module';
 import { API_PREFIX, configureHttpApp } from './app.setup';
 import { treasuryKafkaOptions } from './capacity/presentation/kafka/treasury-kafka.options';
-import { AppConfig } from './config/app-config';
+import { AppConfig, LOG_LEVELS, LogLevel } from './config/app-config';
 import { OPENAPI_PATH } from './docs/openapi';
+
+/** The configured level and every level more severe than it. */
+function enabledLevels(minimum: LogLevel): LogLevel[] {
+  return LOG_LEVELS.slice(LOG_LEVELS.indexOf(minimum));
+}
 
 async function bootstrap(): Promise<void> {
   const app = await NestFactory.create(AppModule, { bufferLogs: true });
   const config = app.get(ConfigService<AppConfig, true>);
   const logger = new Logger('Bootstrap');
 
-  app.useLogger(new ConsoleLogger({ json: config.get('env', { infer: true }) === 'production' }));
+  app.useLogger(
+    new ConsoleLogger({
+      json: config.get('env', { infer: true }) === 'production',
+      logLevels: enabledLevels(config.get('logLevel', { infer: true })),
+    }),
+  );
   configureHttpApp(app);
 
   const kafka = config.get('kafka', { infer: true });

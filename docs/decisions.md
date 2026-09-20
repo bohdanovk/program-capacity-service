@@ -288,3 +288,17 @@ nothing. The API itself returns JSON.
 
 **In practice.** The end-to-end suite asserts the headers, so removing them by accident
 fails the build.
+
+## 20. One access-log line per request, and a configurable log level
+
+**What we do.** When a response finishes, the service logs method, path, status, duration,
+the name of the API key that authenticated (or `-`) and the request id. Health probes log
+at `debug`. `LOG_LEVEL` sets the least severe level to emit; production defaults to `log`,
+everything else to `debug`.
+
+**Why.** Without an access log, the only trace of a request that did not fail with a 5xx is
+in the client. Operations need to answer "what did client X do at 10:15" from the logs, by
+request id. Probes arrive every few seconds and would bury everything else.
+
+**In practice.** In production the logs are JSON, one object per line, ready for an
+aggregator. The client name is never the secret.
