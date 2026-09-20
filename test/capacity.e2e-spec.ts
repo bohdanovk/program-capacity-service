@@ -57,6 +57,13 @@ describe('Capacity API (e2e)', () => {
       const response = await http.get('/health').set('x-request-id', 'trace-123').expect(200);
       expect(response.headers['x-request-id']).toBe('trace-123');
     });
+
+    it('sends security headers and does not advertise the server stack', async () => {
+      const response = await http.get('/health').expect(200);
+      expect(response.headers['x-powered-by']).toBeUndefined();
+      expect(response.headers['x-content-type-options']).toBe('nosniff');
+      expect(response.headers['x-frame-options']).toBe('SAMEORIGIN');
+    });
   });
 
   describe('pagination', () => {

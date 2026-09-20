@@ -123,6 +123,9 @@ opaque `?cursor=`. A page is `{ "items": [...], "nextCursor": "..." | null, "lim
 pass `nextCursor` back until it is null. A cursor from another list or from elsewhere is a 400
 `INVALID_CURSOR`. Nothing in the service ever loads a whole collection.
 
+Every response carries the standard security headers (`helmet`, no `X-Powered-By`) and the
+request id.
+
 ## Architecture
 
 One bounded context, `capacity`, laid out in the classic four layers. Dependencies point

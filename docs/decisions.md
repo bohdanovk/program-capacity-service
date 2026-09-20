@@ -274,3 +274,17 @@ a 400, not corrected, because a payments API should not guess what the caller me
 - **Scope.** A permission attached to an API key, `read` or `write`.
 - **Memento.** The plain-data copy of a program that the store keeps and the aggregate is
   rebuilt from.
+
+## 19. Security headers on every response, without a Content Security Policy
+
+**What we do.** `helmet` adds the standard headers (`X-Content-Type-Options`,
+`Strict-Transport-Security`, `X-Frame-Options`, `Referrer-Policy`) and removes
+`X-Powered-By`. Content Security Policy is switched off.
+
+**Why.** The headers cost nothing and close well-known browser-side holes. A Content
+Security Policy only protects HTML pages, and the only HTML this service serves is the
+OpenAPI UI, which needs inline scripts and styles; a policy that allows those protects
+nothing. The API itself returns JSON.
+
+**In practice.** The end-to-end suite asserts the headers, so removing them by accident
+fails the build.
