@@ -1,10 +1,20 @@
 import { Pool } from 'pg';
 import { ReserveCapacityUseCase } from '../src/capacity/application/use-cases/reserve-capacity.use-case';
 import { Currency } from '../src/capacity/domain/currency';
-import { ConcurrencyConflictError, InsufficientCapacityError } from '../src/capacity/domain/errors';
+import {
+  ConcurrencyConflictError,
+  InsufficientCapacityError,
+  ReservationsNotLoadedError,
+} from '../src/capacity/domain/errors';
 import { ExchangeRate } from '../src/capacity/domain/exchange-rate';
 import { Money } from '../src/capacity/domain/money';
-import { Program } from '../src/capacity/domain/program';
+import {
+  invoiceScope,
+  Program,
+  reconciliationScope,
+  TreasurySnapshot,
+} from '../src/capacity/domain/program';
+import { Reservation, ReservationStatus } from '../src/capacity/domain/reservation';
 import { StaticFxRateProvider } from '../src/capacity/infrastructure/fx/static-fx-rate.provider';
 import { PostgresProgramRepository } from '../src/capacity/infrastructure/persistence/postgres-program.repository';
 import { encodeCursor, InvalidCursorError } from '../src/shared/pagination/pagination';
@@ -24,13 +34,14 @@ describe('PostgresProgramRepository', () => {
   });
 
   beforeEach(async () => {
-    await pool.query('TRUNCATE programs');
+    await pool.query('TRUNCATE reservations, programs');
     first = new PostgresProgramRepository(process.env.DATABASE_URL!);
     second = new PostgresProgramRepository(process.env.DATABASE_URL!);
     await Promise.all([first.onModuleInit(), second.onModuleInit()]);
   });
 
   afterEach(async () => {
+    jest.restoreAllMocks();
     await Promise.all([first.onApplicationShutdown(), second.onApplicationShutdown()]);
   });
 
@@ -65,8 +76,14 @@ describe('PostgresProgramRepository', () => {
     await first.save(program);
     await first.onApplicationShutdown();
 
-    const loaded = (await second.findById(program.id))!;
+    const loaded = (await second.findById(program.id, {
+      invoiceIds: ['LOCAL', 'TREASURY'],
+      allActive: false,
+    }))!;
     expect(loaded.toMemento()).toEqual({ ...program.toMemento(), version: 1 });
+    expect(loaded.findReservation('LOCAL')?.toMemento()).toEqual(
+      program.findReservation('LOCAL')?.toMemento(),
+    );
     expect(loaded.findReservation('LOCAL')?.releasedAt).toBeInstanceOf(Date);
     expect(loaded.findReservation('TREASURY')?.exchangeRate).toBeNull();
     expect(loaded.applyTreasuryLimitChange({ sequence: 1, creditLimit: usd('1.00') }, at)).toBe(
@@ -87,8 +104,8 @@ describe('PostgresProgramRepository', () => {
 
   it('rejects a stale update without overwriting the winning state', async () => {
     await first.save(create());
-    const left = (await first.findById('PRG-1'))!;
-    const right = (await second.findById('PRG-1'))!;
+    const left = (await first.findById('PRG-1', invoiceScope('LEFT')))!;
+    const right = (await second.findById('PRG-1', invoiceScope('RIGHT')))!;
     left.reserve({
       invoiceId: 'LEFT',
       invoiceAmount: usd('60.00'),
@@ -137,6 +154,137 @@ describe('PostgresProgramRepository', () => {
     const stored = (await first.findById('PRG-1'))!;
     expect(stored.reservedTotal.toDecimalString()).toBe('60.00');
     expect(stored.activeReservationCount).toBe(1);
+  });
+
+  it('loads only the requested reservations and pages by time, invoice and status', async () => {
+    const program = create();
+    for (const invoiceId of ['INV-C', 'INV-B', 'INV-A']) {
+      program.reserve({
+        invoiceId,
+        invoiceAmount: usd('10.00'),
+        exchangeRate: ExchangeRate.identity(Currency.of('USD')),
+        at,
+      });
+    }
+    program.release({ invoiceId: 'INV-B', at });
+    await first.save(program);
+    const reads = jest.spyOn(Reservation, 'fromMemento');
+    const bare = (await second.findById(program.id))!;
+    await second.findPage({ limit: 2, cursor: null });
+    expect(reads).not.toHaveBeenCalled();
+    expect(bare.reservedTotal.toDecimalString()).toBe('20.00');
+    expect(() => bare.findReservation('INV-B')).toThrow(ReservationsNotLoadedError);
+
+    const one = (await second.findById(program.id, invoiceScope('INV-B')))!;
+    expect(reads).toHaveBeenCalledTimes(1);
+    expect(one.findReservation('INV-B')?.status).toBe(ReservationStatus.Released);
+
+    const firstPage = await first.findReservationPage(program.id, { limit: 2, cursor: null });
+    const nextPage = await second.findReservationPage(program.id, {
+      limit: 2,
+      cursor: firstPage.nextCursor,
+    });
+    expect(firstPage.items.map((item) => item.invoiceId)).toEqual(['INV-A', 'INV-B']);
+    expect(nextPage.items.map((item) => item.invoiceId)).toEqual(['INV-C']);
+    expect(nextPage.nextCursor).toBeNull();
+
+    const active = await first.findReservationPage(
+      program.id,
+      { limit: 1, cursor: null },
+      ReservationStatus.Active,
+    );
+    const releasing = (await second.findById(program.id, invoiceScope('INV-A')))!;
+    releasing.release({ invoiceId: 'INV-A', at });
+    await second.save(releasing);
+    const remaining = await first.findReservationPage(
+      program.id,
+      { limit: 2, cursor: active.nextCursor },
+      ReservationStatus.Active,
+    );
+    expect(remaining.items.map((item) => item.invoiceId)).toEqual(['INV-C']);
+    const released = await first.findReservationPage(
+      program.id,
+      { limit: 10, cursor: null },
+      ReservationStatus.Released,
+    );
+    expect(released.items.map((item) => item.invoiceId)).toEqual(['INV-A', 'INV-B']);
+  });
+
+  it('reconciles active and named reservations without reading or rewriting unrelated history', async () => {
+    const program = create();
+    for (const invoiceId of ['ACTIVE', 'HISTORY', 'REOPEN']) {
+      program.reserve({
+        invoiceId,
+        invoiceAmount: usd('10.00'),
+        exchangeRate: ExchangeRate.identity(Currency.of('USD')),
+        at,
+      });
+    }
+    program.release({ invoiceId: 'HISTORY', at });
+    program.release({ invoiceId: 'REOPEN', at });
+    await first.save(program);
+    const before = await pool.query<{ xmin: string }>(
+      "SELECT xmin::text FROM reservations WHERE program_id = $1 AND invoice_id = 'HISTORY'",
+      [program.id],
+    );
+    const snapshot: TreasurySnapshot = {
+      sequence: 1,
+      asOf: new Date(at.getTime() + 1000),
+      creditLimit: usd('100.00'),
+      activeReservations: [
+        { invoiceId: 'REOPEN', invoiceAmount: usd('20.00'), reservedAmount: usd('20.00') },
+        { invoiceId: 'NEW', invoiceAmount: usd('30.00'), reservedAmount: usd('30.00') },
+      ],
+    };
+    const reads = jest.spyOn(Reservation, 'fromMemento');
+    const loaded = (await second.findById(program.id, reconciliationScope(snapshot)))!;
+    expect(reads).toHaveBeenCalledTimes(2);
+    expect(loaded.reconcile(snapshot, snapshot.asOf)).toMatchObject({
+      added: 1,
+      updated: 1,
+      released: 1,
+    });
+    await second.save(loaded);
+    const capacity = (await first.findById(program.id))!;
+    expect(capacity.reservedTotal.toDecimalString()).toBe('50.00');
+    expect(capacity.activeReservationCount).toBe(2);
+    const history = await pool.query<{ xmin: string }>(
+      "SELECT xmin::text FROM reservations WHERE program_id = $1 AND invoice_id = 'HISTORY'",
+      [program.id],
+    );
+    expect(history.rows).toEqual(before.rows);
+    const entries = await first.findReservationPage(program.id, { limit: 10, cursor: null });
+    expect(entries.items.filter((item) => item.isActive).map((item) => item.invoiceId)).toEqual([
+      'REOPEN',
+      'NEW',
+    ]);
+  });
+
+  it('rolls back the program update when a reservation write fails', async () => {
+    await first.save(create());
+    await pool.query(
+      "ALTER TABLE reservations ADD CONSTRAINT reject_failure CHECK (invoice_id <> 'FAIL')",
+    );
+    try {
+      const loaded = (await first.findById('PRG-1', invoiceScope('FAIL')))!;
+      loaded.reserve({
+        invoiceId: 'FAIL',
+        invoiceAmount: usd('10.00'),
+        exchangeRate: ExchangeRate.identity(Currency.of('USD')),
+        at,
+      });
+      await expect(first.save(loaded)).rejects.toMatchObject({ code: '23514' });
+      const unchanged = (await second.findById('PRG-1'))!;
+      expect(unchanged.version).toBe(1);
+      expect(unchanged.reservedTotal.toDecimalString()).toBe('0.00');
+      expect(
+        (await second.findReservationPage('PRG-1', { limit: 10, cursor: null })).items,
+      ).toEqual([]);
+      await first.save(create('AFTER-FAILURE'));
+      expect(await second.findById('AFTER-FAILURE')).not.toBeNull();
+    } finally {
+      await pool.query('ALTER TABLE reservations DROP CONSTRAINT reject_failure');
+    }
   });
 
   it('pages by id using the same case and punctuation order as memory', async () => {

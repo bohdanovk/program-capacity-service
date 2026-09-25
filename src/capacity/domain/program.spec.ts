@@ -7,10 +7,18 @@ import {
   NonPositiveAmountError,
   ReservationConflictError,
   ReservationNotFoundError,
+  ReservationsNotLoadedError,
 } from './errors';
 import { ExchangeRate } from './exchange-rate';
 import { Money } from './money';
-import { Program } from './program';
+import {
+  invoiceScope,
+  NO_RESERVATIONS,
+  Program,
+  reconciliationScope,
+  ReservationScope,
+  TreasurySnapshot,
+} from './program';
 import { ReservationStatus } from './reservation';
 
 const USD = Currency.of('USD');
@@ -432,15 +440,166 @@ describe('Program', () => {
     program.applyTreasuryLimitChange({ sequence: 3, creditLimit: usd('900.00') }, T2);
 
     const memento = program.toMemento();
-    const restored = Program.rehydrate(
-      JSON.parse(JSON.stringify(memento), reviveDates) as typeof memento,
-    );
+    const reservations = program.changedReservations();
+    const restored = Program.rehydrate(overTheWire(memento), {
+      scope: { invoiceIds: ['INV-1', 'INV-2'], allActive: false },
+      reservations: overTheWire(reservations),
+    });
 
     expect(restored.toMemento()).toEqual(memento);
+    expect(restored.changedReservations()).toEqual([]);
     expect(restored.available.toString()).toBe('791.48 USD');
+    expect(restored.activeReservationCount).toBe(1);
     expect(restored.findReservation('INV-1')?.exchangeRate?.toDecimalString()).toBe('1.085');
+    expect(restored.findReservation('INV-2')?.toMemento()).toEqual(reservations[1]);
+  });
+
+  describe('loaded with a reservation scope', () => {
+    /**
+     * Saves the program the way a repository does and returns a loader that reads it back
+     * with any scope, selecting reservations exactly as the repository contract says.
+     */
+    function store(program: Program): (scope: ReservationScope) => Program {
+      const record = program.toMemento();
+      const reservations = program.changedReservations();
+      return (scope) =>
+        Program.rehydrate(record, {
+          scope,
+          reservations: reservations.filter(
+            (reservation) =>
+              scope.invoiceIds.includes(reservation.invoiceId) ||
+              (scope.allActive && reservation.status === ReservationStatus.Active),
+          ),
+        });
+    }
+
+    function programWithHistory(): (scope: ReservationScope) => Program {
+      const program = programWithLimit('1000.00');
+      for (const invoiceId of ['INV-A', 'INV-B', 'INV-OLD']) {
+        program.reserve({
+          invoiceId,
+          invoiceAmount: usd('100.00'),
+          exchangeRate: identity,
+          at: T1,
+        });
+      }
+      program.release({ invoiceId: 'INV-OLD', at: T1 });
+      return store(program);
+    }
+
+    it('knows its capacity without loading a single reservation', () => {
+      const program = programWithHistory()(NO_RESERVATIONS);
+
+      expect(program.reservedTotal.toString()).toBe('200.00 USD');
+      expect(program.available.toString()).toBe('800.00 USD');
+      expect(program.activeReservationCount).toBe(2);
+    });
+
+    it('refuses to act on reservations it was not loaded with', () => {
+      const program = programWithHistory()(invoiceScope('INV-A'));
+
+      // INV-OLD exists but was not loaded; treating it as unknown would let it be reserved again.
+      expect(() => program.findReservation('INV-OLD')).toThrow(ReservationsNotLoadedError);
+      expect(() =>
+        program.reserve({
+          invoiceId: 'INV-OLD',
+          invoiceAmount: usd('100.00'),
+          exchangeRate: identity,
+          at: T2,
+        }),
+      ).toThrow(ReservationsNotLoadedError);
+      expect(() => program.release({ invoiceId: 'INV-B', at: T2 })).toThrow(
+        ReservationsNotLoadedError,
+      );
+      expect(program.findReservation('INV-A')?.status).toBe(ReservationStatus.Active);
+    });
+
+    it('reserves and releases with only the invoice concerned, and writes only that one', () => {
+      const load = programWithHistory();
+
+      const reserving = load(invoiceScope('INV-NEW'));
+      reserving.reserve({
+        invoiceId: 'INV-NEW',
+        invoiceAmount: usd('50.00'),
+        exchangeRate: identity,
+        at: T2,
+      });
+      expect(reserving.reservedTotal.toString()).toBe('250.00 USD');
+      expect(reserving.activeReservationCount).toBe(3);
+      expect(reserving.changedReservations().map((entry) => entry.invoiceId)).toEqual(['INV-NEW']);
+
+      const releasing = load(invoiceScope('INV-A'));
+      releasing.release({ invoiceId: 'INV-A', at: T2 });
+      expect(releasing.reservedTotal.toString()).toBe('100.00 USD');
+      expect(releasing.activeReservationCount).toBe(1);
+      expect(releasing.changedReservations().map((entry) => entry.invoiceId)).toEqual(['INV-A']);
+    });
+
+    it('still recognises a released invoice when that invoice is loaded', () => {
+      const program = programWithHistory()(invoiceScope('INV-OLD'));
+
+      const replay = program.reserve({
+        invoiceId: 'INV-OLD',
+        invoiceAmount: usd('100.00'),
+        exchangeRate: identity,
+        at: T2,
+      });
+
+      expect(replay.created).toBe(false);
+      expect(replay.reservation.status).toBe(ReservationStatus.Released);
+      expect(program.changedReservations()).toEqual([]);
+    });
+
+    it('reconciles from the active and the named reservations, leaving history unread', () => {
+      const load = programWithHistory();
+      const snapshot: TreasurySnapshot = {
+        sequence: 1,
+        asOf: T2,
+        creditLimit: usd('1000.00'),
+        activeReservations: [
+          { invoiceId: 'INV-A', invoiceAmount: usd('100.00'), reservedAmount: usd('100.00') },
+          { invoiceId: 'INV-C', invoiceAmount: usd('30.00'), reservedAmount: usd('30.00') },
+        ],
+      };
+
+      const program = load(reconciliationScope(snapshot));
+      const result = program.reconcile(snapshot, T3);
+
+      expect(result).toMatchObject({ added: 1, released: 1, unchanged: 1, updated: 0 });
+      expect(program.reservedTotal.toString()).toBe('130.00 USD');
+      expect(program.activeReservationCount).toBe(2);
+      expect(program.changedReservations().map((entry) => entry.invoiceId)).toEqual([
+        'INV-C',
+        'INV-B',
+      ]);
+      expect(() => program.findReservation('INV-OLD')).toThrow(ReservationsNotLoadedError);
+    });
+
+    it('refuses to reconcile without every active reservation and every named one', () => {
+      const load = programWithHistory();
+      const snapshot: TreasurySnapshot = {
+        sequence: 1,
+        asOf: T2,
+        creditLimit: usd('1000.00'),
+        activeReservations: [
+          { invoiceId: 'INV-A', invoiceAmount: usd('100.00'), reservedAmount: usd('100.00') },
+        ],
+      };
+
+      expect(() => load(invoiceScope('INV-A')).reconcile(snapshot, T3)).toThrow(
+        ReservationsNotLoadedError,
+      );
+      expect(() => load({ invoiceIds: [], allActive: true }).reconcile(snapshot, T3)).toThrow(
+        ReservationsNotLoadedError,
+      );
+    });
   });
 });
+
+/** What a store that serialises to JSON hands back. */
+function overTheWire<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value), reviveDates) as T;
+}
 
 function reviveDates(key: string, value: unknown): unknown {
   return typeof value === 'string' && key.endsWith('At') ? new Date(value) : value;

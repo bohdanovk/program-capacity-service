@@ -1,20 +1,23 @@
-import { Controller, Logger, UseFilters, ValidationPipe } from '@nestjs/common';
+import { Controller, Logger, UseFilters, UseInterceptors, ValidationPipe } from '@nestjs/common';
 import { Ctx, EventPattern, KafkaContext, Payload } from '@nestjs/microservices';
 import { ApplyTreasuryLimitUseCase } from '../../application/use-cases/apply-treasury-limit.use-case';
 import { ReconcileProgramUseCase } from '../../application/use-cases/reconcile-program.use-case';
 import { describeMessageOrigin } from './kafka-message-origin';
 import { TreasuryMessageExceptionFilter } from './treasury-message-exception.filter';
 import { TreasuryMessageType, TreasuryProgramMessageDto } from './treasury-program-message.dto';
-
-/** Topic name is part of the contract with treasury (versioned), hence a constant rather than config. */
-export const TREASURY_PROGRAM_CAPACITY_TOPIC = 'treasury.program-capacity.v1';
+import { TreasuryRetryInterceptor } from './treasury-retry.interceptor';
+import { TREASURY_PROGRAM_CAPACITY_TOPIC } from './treasury-topics';
 
 /**
  * Inbound Kafka adapter. It only translates messages into application commands; every
  * decision (staleness, currency checks, what a snapshot overrides) belongs to the domain.
  * Messages are keyed by programId, so all updates for one program arrive in order.
+ *
+ * Failures are bounded: the interceptor retries what may succeed later, and the filter
+ * dead-letters what still fails, so no single message can hold its partition indefinitely.
  */
 @Controller()
+@UseInterceptors(TreasuryRetryInterceptor)
 @UseFilters(TreasuryMessageExceptionFilter)
 export class TreasuryCapacityConsumer {
   private readonly logger = new Logger(TreasuryCapacityConsumer.name);

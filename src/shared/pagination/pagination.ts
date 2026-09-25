@@ -78,21 +78,23 @@ export function compareSortKeys(a: SortKey, b: SortKey): number {
 
 export interface PaginateInput<T> {
   readonly kind: string;
-  /** Items already sorted ascending by `keyOf` (use {@link compareSortKeys}). */
-  readonly sorted: readonly T[];
   readonly request: PageRequest;
   readonly keyOf: (item: T) => SortKey;
+  /**
+   * Up to `count` items that sort after `after` (by {@link compareSortKeys}), in order; from
+   * the first item when `after` is null. An ordered index answers this without a scan.
+   */
+  readonly itemsAfter: (after: SortKey | null, count: number) => readonly T[];
 }
 
 /**
- * Pages through an in-memory collection. One extra item is inspected to learn whether a
- * next page exists, so no count is needed. This is what a database adapter replaces with
- * the equivalent keyset query.
+ * Builds one page from an ordered source. One item beyond the limit is asked for to learn
+ * whether a next page exists, so no count is needed. This is what a database adapter replaces
+ * with the equivalent keyset query.
  */
-export function paginateSorted<T>({ kind, sorted, request, keyOf }: PaginateInput<T>): Page<T> {
+export function paginate<T>({ kind, request, keyOf, itemsAfter }: PaginateInput<T>): Page<T> {
   const after = request.cursor === null ? null : decodeCursor(kind, request.cursor);
-  const candidates =
-    after === null ? sorted : sorted.filter((item) => compareSortKeys(keyOf(item), after) > 0);
+  const candidates = itemsAfter(after, request.limit + 1);
   const items = candidates.slice(0, request.limit);
   const last = items.at(-1);
   const hasMore = candidates.length > request.limit && last !== undefined;

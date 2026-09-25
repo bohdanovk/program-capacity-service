@@ -3,6 +3,7 @@ import { CLOCK } from '../../domain/ports/clock';
 import type { Clock } from '../../domain/ports/clock';
 import { PROGRAM_REPOSITORY } from '../../domain/ports/program.repository';
 import type { ProgramRepository } from '../../domain/ports/program.repository';
+import { invoiceScope } from '../../domain/program';
 import { ReleaseReservationCommand } from '../commands';
 import { withConcurrencyRetry } from '../concurrency';
 import { requireProgram } from '../program-loader';
@@ -18,7 +19,11 @@ export class ReleaseReservationUseCase {
   /** Idempotent: releasing an already released reservation returns it unchanged. */
   execute(command: ReleaseReservationCommand): Promise<ReservationView> {
     return withConcurrencyRetry(async () => {
-      const program = await requireProgram(this.programs, command.programId);
+      const program = await requireProgram(
+        this.programs,
+        command.programId,
+        invoiceScope(command.invoiceId),
+      );
       const result = program.release({ invoiceId: command.invoiceId, at: this.clock.now() });
 
       if (result.released) {

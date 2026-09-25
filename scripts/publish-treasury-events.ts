@@ -6,8 +6,9 @@
  *
  * The default scenario is clean: limit set, snapshot, limit raised, and one out-of-order
  * duplicate that the service logs as STALE. `--with-poison` adds a malformed message, which
- * the service logs at ERROR level and drops; that message stays in the topic and is reported
- * again by every new consumer group that replays it, so only send it on purpose.
+ * the service logs at ERROR level and copies to `treasury.program-capacity.v1.dlq`; that
+ * message stays in the source topic and is dead-lettered again by every new consumer group
+ * that replays it, so only send it on purpose.
  *
  * Sequence numbers restart at 1 each run; the service ignores anything at or below the last
  * applied sequence, so re-running against a live instance logs STALE for the first messages.
@@ -85,7 +86,7 @@ const messages: { label: string; value: Record<string, unknown> }[] = [
 
 if (withPoison) {
   messages.push({
-    label: 'malformed message (float amount) -> expected to be dropped as poison',
+    label: 'malformed message (float amount) -> expected to be dead-lettered as poison',
     value: {
       type: 'ProgramLimitChanged',
       programId,

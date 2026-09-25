@@ -40,9 +40,10 @@ docker compose --profile app logs app          # CREATED, APPLIED, APPLIED, STAL
 
 For the feed against a locally running service instead: `npm run kafka:up`, then start with
 `KAFKA_ENABLED=true npm run start:dev`. `npm run kafka:publish -- PRG-002 --with-poison` adds
-a malformed message to show the poison-message path (logged at ERROR level and dropped; it
-stays in the topic, so every new consumer group replays and reports it). `npm run kafka:down`
-stops Kafka without stopping PostgreSQL. `npm run db:down` stops PostgreSQL and keeps its data.
+a malformed message to show the poison-message path (logged at ERROR level and copied to the
+dead-letter topic `treasury.program-capacity.v1.dlq`; it stays in the source topic, so every
+new consumer group replays and dead-letters it again). `npm run kafka:down` stops Kafka without
+stopping PostgreSQL. `npm run db:down` stops PostgreSQL and keeps its data.
 
 Everything at once (format check, lint with architecture rules, type check, unit and e2e tests):
 
@@ -158,13 +159,14 @@ src/
       queries/                    read side
       concurrency.ts              optimistic-lock retry
     infrastructure/               outbound adapters, one Nest module per port
-      persistence/                PostgresProgramRepository (JSONB + atomic version check),
-                                  InMemoryProgramRepository (process-local mementos)
+      persistence/                PostgresProgramRepository (program and reservation rows,
+                                  indexed pages, transactional version check),
+                                  InMemoryProgramRepository (records and sorted-btree indexes)
       fx/                         StaticFxRateProvider (rates from configuration)
       clock/                      SystemClock
     presentation/                 inbound adapters; both call the same use cases
       http/                       controllers, DTOs with OpenAPI metadata
-      kafka/                      treasury consumer, message DTO, acknowledgement policy
+      kafka/                      treasury consumer, message DTO, retry and dead-letter policy
     capacity.module.ts            binds ports to adapters
   auth/                           API-key guard, scopes, @Public / @RequireScopes
   common/                         request id, access log, error envelope, shared validation patterns
@@ -178,7 +180,8 @@ src/
 How a reservation flows: `ReservationsController` validates the shape of the request
 (`class-validator`) and hands a command of plain strings to `ReserveCapacityUseCase`. The use
 case parses `Money` (which rejects excess precision), loads the `Program` through the
-repository port, asks the FX port for a rate when currencies differ, and calls
+repository port (the program record and this invoice's reservation, if any, never the
+others), asks the FX port for a rate when currencies differ, and calls
 `program.reserve(...)`. The aggregate applies every rule and either returns a reservation or
 throws a typed `DomainError`. The use case saves with an optimistic version check and retries
 once more on a conflict. A global filter maps the error kind to an HTTP status.
@@ -228,12 +231,21 @@ those two are the point here (see decision 12).
 - **Concurrency**: two requests racing for the last capacity both load the same state; the
   second save fails the version check, the use case reloads and re-evaluates, and the loser
   gets a 409 for the real reason. This is tested against the actual repository.
+- **Load**: a request reads and writes only the reservations it concerns. The reserved total
+  and the active count are kept on the program record. Reservation lists use PostgreSQL
+  indexes or `sorted-btree` in memory, so index updates and cursor lookups grow logarithmically
+  with history. Reading capacity
+  loads no reservations. A treasury snapshot reads the active reservations and the ones it
+  names. Tests count records read and written, key comparisons and index entries visited on a
+  program with 5,000 reservations. The library's internal moves are not counted.
 - **Treasury feed**: one topic keyed by `programId`, a per-program monotonic `sequence`.
   Anything at or below the last applied sequence is `STALE` and ignored, which makes
   at-least-once delivery, replays and duplicates safe. A snapshot replaces the program's
   state as of its `occurredAt`; local changes made after that instant are preserved until the
-  next snapshot confirms them. Poison messages are logged with topic, partition, offset and
-  key, then acknowledged; transient failures are rethrown so kafkajs redelivers.
+  next snapshot confirms them. Poison messages go to a dead-letter topic at once. Any other
+  failure is retried with back-off up to `KAFKA_MAX_ATTEMPTS` times and then dead-lettered
+  too, so no message can hold its partition. A message stays unacknowledged, for kafkajs to
+  redeliver, only when the dead-letter topic itself cannot take it.
 
 ## Configuration
 
@@ -243,22 +255,25 @@ does not start, and the error names each offending variable. Development supplie
 `API_KEYS`, `FX_RATES` and a `DATABASE_URL` matching Docker Compose. Test and production require
 explicit API keys and, when using PostgreSQL, a database URL. FX rates may be empty.
 
-| Variable          | Default                           | Meaning                                                                                                      |
-| ----------------- | --------------------------------- | ------------------------------------------------------------------------------------------------------------ |
-| `NODE_ENV`        | `development`                     | `production` switches logs to JSON                                                                           |
-| `PORT`            | `3000`                            |                                                                                                              |
-| `LOG_LEVEL`       | `log` in production, else `debug` | Least severe level to emit: `verbose`, `debug`, `log`, `warn`, `error`, `fatal`                              |
-| `STORE`           | `postgres`                        | `postgres` for durable shared state, `memory` for process-local state                                        |
-| `DATABASE_URL`    | local Compose URL in development  | PostgreSQL connection URL; required for the PostgreSQL store in test and production                          |
-| `API_KEYS`        | required                          | `name:secret:scope[+scope]`, comma separated. Secret 16+ chars of `[A-Za-z0-9._~-]`. Scopes `read`, `write`. |
-| `FX_RATES`        | empty                             | `BASE/QUOTE=rate`, comma separated, up to 10 decimals                                                        |
-| `KAFKA_ENABLED`   | `false`                           | Start the treasury consumer                                                                                  |
-| `KAFKA_BROKERS`   | `localhost:9092`                  | Comma separated                                                                                              |
-| `KAFKA_CLIENT_ID` | `program-capacity-service`        |                                                                                                              |
-| `KAFKA_GROUP_ID`  | `program-capacity-service`        | A new group reads the topic from the beginning and rebuilds state                                            |
-| `SWAGGER_ENABLED` | `true`                            | Serve `/docs`                                                                                                |
+| Variable                 | Default                           | Meaning                                                                                                      |
+| ------------------------ | --------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `NODE_ENV`               | `development`                     | `production` switches logs to JSON                                                                           |
+| `PORT`                   | `3000`                            |                                                                                                              |
+| `LOG_LEVEL`              | `log` in production, else `debug` | Least severe level to emit: `verbose`, `debug`, `log`, `warn`, `error`, `fatal`                              |
+| `STORE`                  | `postgres`                        | `postgres` for durable shared state, `memory` for process-local state                                        |
+| `DATABASE_URL`           | local Compose URL in development  | PostgreSQL connection URL; required for the PostgreSQL store in test and production                          |
+| `API_KEYS`               | required                          | `name:secret:scope[+scope]`, comma separated. Secret 16+ chars of `[A-Za-z0-9._~-]`. Scopes `read`, `write`. |
+| `FX_RATES`               | empty                             | `BASE/QUOTE=rate`, comma separated, up to 10 decimals                                                        |
+| `KAFKA_ENABLED`          | `false`                           | Start the treasury consumer                                                                                  |
+| `KAFKA_BROKERS`          | `localhost:9092`                  | Comma separated                                                                                              |
+| `KAFKA_CLIENT_ID`        | `program-capacity-service`        |                                                                                                              |
+| `KAFKA_GROUP_ID`         | `program-capacity-service`        | A new group reads the topic from the beginning and rebuilds state                                            |
+| `KAFKA_MAX_ATTEMPTS`     | `5`                               | Attempts per treasury message before it is dead-lettered (1 to 10); poison messages get one                  |
+| `KAFKA_RETRY_BACKOFF_MS` | `500`                             | Wait before the first retry, doubled for each further one and capped at 10 s (0 to 10000)                    |
+| `SWAGGER_ENABLED`        | `true`                            | Serve `/docs`                                                                                                |
 
-The topic name `treasury.program-capacity.v1` is part of the contract and therefore a constant.
+The topic names `treasury.program-capacity.v1` and `treasury.program-capacity.v1.dlq` are part
+of the contract and therefore constants. Both are provisioned, never auto-created.
 
 ### PostgreSQL setup
 
@@ -280,24 +295,28 @@ Production also requires `API_KEYS`. Use your provider's TLS settings in `DATABA
 Schema setup is explicit; the service checks the table at startup and refuses to start if
 the database or schema is unavailable. It closes its connection pool on shutdown.
 
-Each `programs` row holds an id, a version and JSONB aggregate state, including reservations.
-Money and FX rates remain decimal strings. An insert or version-checked update saves the
-entire aggregate atomically, so multiple service instances share the same concurrency
-protection. Program pagination uses the primary-key index and a deterministic `C` collation.
-Reading or updating a program includes all its reservations, matching the aggregate's
-current consistency boundary.
+Each `programs` row holds an id, a version and JSONB program state with its reserved total
+and active count. Each reservation has its own JSONB row in `reservations`; amounts and FX
+rates remain decimal strings. A transaction saves the version-checked program record and
+only changed reservations. A scoped read obtains both from one database snapshot. Program
+and reservation pagination use indexes with deterministic `C` collation; reservation pages
+can also filter by status.
 
 ## Tests
 
-| Suite                                               | What it proves                                                                                                                               |
-| --------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| `domain/money.spec.ts`                              | Strict parsing, formatting, exactness beyond double precision, currency safety                                                               |
-| `domain/exchange-rate.spec.ts`                      | Rounding modes, mixed minor units (JPY, KWD), full-precision exactness                                                                       |
-| `domain/program.spec.ts`                            | Every aggregate rule: capacity boundary, idempotency, conflicts, release, limit changes, all reconciliation cases, persistence round trip    |
-| `application/.../reserve-capacity.use-case.spec.ts` | No over-allocation under concurrent requests, through the real repository                                                                    |
-| `presentation/kafka/...message.dto.spec.ts`         | The Kafka wire contract rejects what it must                                                                                                 |
-| `test/capacity.e2e-spec.ts`                         | Authentication and scopes, error envelope, the whole lifecycle over HTTP                                                                     |
-| `test/postgres.repository-spec.ts`                  | Persistence across connections, exact serialization, competing inserts and updates, capacity races, SQL pagination and startup schema checks |
+| Suite                                                     | What it proves                                                                                                                            |
+| --------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| `domain/money.spec.ts`                                    | Strict parsing, formatting, exactness beyond double precision, currency safety                                                            |
+| `domain/exchange-rate.spec.ts`                            | Rounding modes, mixed minor units (JPY, KWD), full-precision exactness                                                                    |
+| `domain/program.spec.ts`                                  | Every aggregate rule: capacity boundary, idempotency, conflicts, release, limit changes, all reconciliation cases, persistence round trip |
+| `application/.../reserve-capacity.use-case.spec.ts`       | No over-allocation under concurrent requests, through the real repository                                                                 |
+| `application/request-cost.spec.ts`                        | Every request on a program with 5,000 reservations reads and writes only the records it concerns, with bounded index work                 |
+| `infrastructure/.../ordered-index.spec.ts`                | The B+ tree stays ordered under random inserts and removals, and no operation's work grows with its size (checked at 100,000 entries)     |
+| `infrastructure/.../in-memory-program.repository.spec.ts` | List order, status filters, cursors that stay valid while reservations change status, scoped loading, version conflicts                   |
+| `presentation/kafka/...message.dto.spec.ts`               | The Kafka wire contract rejects what it must                                                                                              |
+| `test/capacity.e2e-spec.ts`                               | Authentication and scopes, error envelope, the whole lifecycle over HTTP                                                                  |
+| `test/treasury-consumer.e2e-spec.ts`                      | Through Nest's real Kafka server: retries, dead-lettering, the partition moving on, redelivery when the dead-letter topic is down         |
+| `test/postgres.repository-spec.ts`                        | Persistence across connections, scoped reads and writes, atomic concurrency, reconciliation, SQL pagination and startup schema checks     |
 
 ```bash
 npm test            # unit
@@ -328,8 +347,9 @@ The short list; each has a fuller record in [docs/decisions.md](docs/decisions.m
    risk team would usually prefer; both are one-line changes if not.
 5. API keys with scopes instead of OAuth2/JWT. Right for machine clients today; the guard is
    the only thing to replace.
-6. Poison messages are dropped and logged rather than sent to a dead-letter topic; the
-   decision point is one filter.
+6. A treasury message that fails for good goes to a dead-letter topic with the reason in its
+   headers. Nothing reads that topic automatically: replaying a message means copying it back
+   onto the source topic once the cause is fixed, and stale sequences make that safe.
 7. Nest 11 and TypeScript 5.9 rather than the versions released in the last few weeks.
 8. `multer` is overridden to 2.4.0 (Nest 11 pins a version with DoS advisories; this service
    has no file uploads). `npm audit` is clean.
@@ -339,7 +359,7 @@ The short list; each has a fuller record in [docs/decisions.md](docs/decisions.m
 A readiness probe that checks storage and consumer connectivity after startup, Kafka
 credentials and TLS in the consumer options, secrets from a
 secrets manager, metrics (reservations per outcome, treasury messages per outcome, consumer
-lag), a dead-letter topic for dropped treasury messages, an outbox that publishes this
+lag, dead-letter topic depth), an outbox that publishes this
 service's reservations and releases back to treasury, and an identity provider for client
 credentials.
 

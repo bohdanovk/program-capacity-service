@@ -150,3 +150,15 @@ export class ConcurrencyConflictError extends DomainError {
     );
   }
 }
+
+/**
+ * A programming error, not a business outcome: an operation ran on a program that was loaded
+ * without the reservations it needs. Answering from a partial view would be silently wrong
+ * (a released invoice would look unknown and could be reserved again), so it fails loudly.
+ */
+export class ReservationsNotLoadedError extends Error {
+  constructor(programId: string, missing: string) {
+    super(`Program "${programId}" was loaded without ${missing}`);
+    this.name = new.target.name;
+  }
+}

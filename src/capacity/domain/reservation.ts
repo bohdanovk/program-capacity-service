@@ -1,3 +1,4 @@
+import { Currency } from './currency';
 import { ExchangeRate } from './exchange-rate';
 import { Money } from './money';
 
@@ -19,6 +20,20 @@ export interface ReservationProps {
   readonly reservedAt: Date;
   readonly releasedAt: Date | null;
   /** Instant of the last state change; drives "newer than snapshot" decisions during reconciliation. */
+  readonly updatedAt: Date;
+}
+
+/** Persistence-friendly, primitive-only shape of a reservation. Amounts are decimal strings. */
+export interface ReservationMemento {
+  readonly invoiceId: string;
+  readonly invoiceAmount: string;
+  readonly invoiceCurrency: string;
+  /** In the program currency. */
+  readonly reservedAmount: string;
+  readonly exchangeRate: string | null;
+  readonly status: ReservationStatus;
+  readonly reservedAt: Date;
+  readonly releasedAt: Date | null;
   readonly updatedAt: Date;
 }
 
@@ -66,8 +81,23 @@ export class Reservation {
     });
   }
 
-  static rehydrate(props: ReservationProps): Reservation {
-    return new Reservation(props);
+  /** The reserved amount is stored without its currency: it is always the program's. */
+  static fromMemento(memento: ReservationMemento, programCurrency: Currency): Reservation {
+    const invoiceCurrency = Currency.parse(memento.invoiceCurrency);
+
+    return new Reservation({
+      invoiceId: memento.invoiceId,
+      invoiceAmount: Money.parse(memento.invoiceAmount, invoiceCurrency),
+      reservedAmount: Money.parse(memento.reservedAmount, programCurrency),
+      exchangeRate:
+        memento.exchangeRate === null
+          ? null
+          : ExchangeRate.parse(invoiceCurrency, programCurrency, memento.exchangeRate),
+      status: memento.status,
+      reservedAt: memento.reservedAt,
+      releasedAt: memento.releasedAt,
+      updatedAt: memento.updatedAt,
+    });
   }
 
   get invoiceId(): string {
@@ -141,7 +171,17 @@ export class Reservation {
     });
   }
 
-  toProps(): ReservationProps {
-    return { ...this.props };
+  toMemento(): ReservationMemento {
+    return {
+      invoiceId: this.props.invoiceId,
+      invoiceAmount: this.props.invoiceAmount.toDecimalString(),
+      invoiceCurrency: this.props.invoiceAmount.currency.code,
+      reservedAmount: this.props.reservedAmount.toDecimalString(),
+      exchangeRate: this.props.exchangeRate?.toDecimalString() ?? null,
+      status: this.props.status,
+      reservedAt: this.props.reservedAt,
+      releasedAt: this.props.releasedAt,
+      updatedAt: this.props.updatedAt,
+    };
   }
 }

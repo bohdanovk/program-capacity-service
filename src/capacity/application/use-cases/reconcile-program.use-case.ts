@@ -5,7 +5,12 @@ import { CLOCK } from '../../domain/ports/clock';
 import type { Clock } from '../../domain/ports/clock';
 import { PROGRAM_REPOSITORY } from '../../domain/ports/program.repository';
 import type { ProgramRepository } from '../../domain/ports/program.repository';
-import { Program, ReconciliationResult, TreasurySnapshot } from '../../domain/program';
+import {
+  Program,
+  ReconciliationResult,
+  reconciliationScope,
+  TreasurySnapshot,
+} from '../../domain/program';
 import { ReconcileProgramCommand } from '../commands';
 import { withConcurrencyRetry } from '../concurrency';
 
@@ -37,7 +42,10 @@ export class ReconcileProgramUseCase {
 
     return withConcurrencyRetry(async () => {
       const now = this.clock.now();
-      const existing = await this.programs.findById(command.programId);
+      const existing = await this.programs.findById(
+        command.programId,
+        reconciliationScope(snapshot),
+      );
       const program =
         existing ??
         Program.create({ id: command.programId, creditLimit: snapshot.creditLimit, at: now });

@@ -8,10 +8,11 @@ import {
   NonPositiveAmountError,
   ReservationConflictError,
   ReservationNotFoundError,
+  ReservationsNotLoadedError,
 } from './errors';
 import { ExchangeRate } from './exchange-rate';
 import { Money } from './money';
-import { Reservation, ReservationProps, ReservationStatus } from './reservation';
+import { Reservation, ReservationMemento } from './reservation';
 
 /**
  * Invoice amounts are converted into program currency rounding away from zero, so a
@@ -70,7 +71,10 @@ export interface ReconciliationResult {
   readonly updated: number;
   /** Local active reservations absent from the snapshot, released as of the snapshot time. */
   readonly released: number;
-  /** Local reservations changed after the snapshot was taken; kept untouched. */
+  /**
+   * Local reservations the snapshot concerns (active, or named in it) that changed after it
+   * was taken; kept untouched. Released history the snapshot does not name is not counted.
+   */
   readonly preserved: number;
   readonly unchanged: number;
 }
@@ -83,26 +87,17 @@ const NO_RECONCILIATION_CHANGES = {
   unchanged: 0,
 } as const;
 
-/** Persistence-friendly, primitive-only shape of a reservation. */
-export interface ReservationMemento {
-  readonly invoiceId: string;
-  readonly invoiceAmount: string;
-  readonly invoiceCurrency: string;
-  readonly reservedAmount: string;
-  readonly exchangeRate: string | null;
-  readonly status: ReservationStatus;
-  readonly reservedAt: Date;
-  readonly releasedAt: Date | null;
-  readonly updatedAt: Date;
-}
-
-/** Persistence-friendly, primitive-only shape of a program. Amounts are decimal strings. */
+/**
+ * Persistence-friendly, primitive-only shape of a program. Amounts are decimal strings.
+ * Reservations are stored beside it, one record each: the reserved total and the active
+ * count live here so that no operation has to read every reservation to know them.
+ */
 export interface ProgramMemento {
   readonly id: string;
   readonly currency: string;
   readonly creditLimit: string;
   readonly reservedTotal: string;
-  readonly reservations: readonly ReservationMemento[];
+  readonly activeReservationCount: number;
   readonly lastTreasurySequence: number | null;
   readonly lastReconciledAt: Date | null;
   readonly version: number;
@@ -111,20 +106,72 @@ export interface ProgramMemento {
 }
 
 /**
+ * Which reservations to load with a program. A program may hold any number of them, released
+ * ones included, so an operation loads only those it touches; the aggregate refuses to act
+ * on anything outside the scope it was loaded with rather than guess.
+ */
+export interface ReservationScope {
+  /** Invoices whose reservations are loaded, whichever of them exist. */
+  readonly invoiceIds: readonly string[];
+  /** Also load every active reservation, whatever its invoice. */
+  readonly allActive: boolean;
+}
+
+/** Enough for the capacity figures and for limit changes. */
+export const NO_RESERVATIONS: ReservationScope = { invoiceIds: [], allActive: false };
+
+/** What reserving, releasing or reading one invoice needs. */
+export function invoiceScope(invoiceId: string): ReservationScope {
+  return { invoiceIds: [invoiceId], allActive: false };
+}
+
+/** What applying a snapshot needs: every active reservation and every invoice it names. */
+export function reconciliationScope(snapshot: TreasurySnapshot): ReservationScope {
+  return {
+    invoiceIds: snapshot.activeReservations.map((entry) => entry.invoiceId),
+    allActive: true,
+  };
+}
+
+/** A scope and the stored reservations that fall within it. */
+export interface LoadedReservations {
+  readonly scope: ReservationScope;
+  readonly reservations: readonly ReservationMemento[];
+}
+
+/** The reservations a Program instance holds: all of them (a new program), or a loaded scope. */
+type Coverage =
+  | { readonly complete: true }
+  | {
+      readonly complete: false;
+      readonly invoiceIds: ReadonlySet<string>;
+      readonly allActive: boolean;
+    };
+
+/**
  * Aggregate root. Owns the single invariant that matters:
  *
  *   sum(active reservations) <= credit limit   (for reservations made through this service)
  *
  * Treasury is the system of record for limits and may lower a limit below the amount already
  * reserved; the program then reports zero availability until releases catch up.
+ *
+ * The reserved total and the active count are kept up to date on every change, so checking
+ * the invariant needs no reservation other than the one being changed. A loaded program
+ * holds only the reservations of its {@link ReservationScope}.
  */
 export class Program {
+  /** Invoices whose reservations changed since the program was created or loaded. */
+  private readonly changedInvoiceIds = new Set<string>();
+
   private constructor(
     readonly id: string,
     readonly currency: Currency,
     private creditLimitValue: Money,
     private reservedTotalValue: Money,
+    private activeReservationCountValue: number,
     private reservations: Map<string, Reservation>,
+    private readonly coverage: Coverage,
     private lastTreasurySequenceValue: number | null,
     private lastReconciledAtValue: Date | null,
     /** Persisted version used for optimistic concurrency control. */
@@ -141,7 +188,9 @@ export class Program {
       input.creditLimit.currency,
       input.creditLimit,
       Money.zero(input.creditLimit.currency),
+      0,
       new Map(),
+      { complete: true },
       null,
       null,
       0,
@@ -150,12 +199,12 @@ export class Program {
     );
   }
 
-  static rehydrate(memento: ProgramMemento): Program {
+  static rehydrate(memento: ProgramMemento, loaded: LoadedReservations): Program {
     const currency = Currency.parse(memento.currency);
     const reservations = new Map<string, Reservation>();
 
-    for (const entry of memento.reservations) {
-      reservations.set(entry.invoiceId, Reservation.rehydrate(toReservationProps(entry, currency)));
+    for (const entry of loaded.reservations) {
+      reservations.set(entry.invoiceId, Reservation.fromMemento(entry, currency));
     }
 
     return new Program(
@@ -163,7 +212,13 @@ export class Program {
       currency,
       Money.parse(memento.creditLimit, currency),
       Money.parse(memento.reservedTotal, currency),
+      memento.activeReservationCount,
       reservations,
+      {
+        complete: false,
+        invoiceIds: new Set(loaded.scope.invoiceIds),
+        allActive: loaded.scope.allActive,
+      },
       memento.lastTreasurySequence,
       memento.lastReconciledAt,
       memento.version,
@@ -172,19 +227,34 @@ export class Program {
     );
   }
 
+  /** The program record itself; reservations are stored separately (see `changedReservations`). */
   toMemento(): ProgramMemento {
     return {
       id: this.id,
       currency: this.currency.code,
       creditLimit: this.creditLimitValue.toDecimalString(),
       reservedTotal: this.reservedTotalValue.toDecimalString(),
-      reservations: [...this.reservations.values()].map(toReservationMemento),
+      activeReservationCount: this.activeReservationCountValue,
       lastTreasurySequence: this.lastTreasurySequenceValue,
       lastReconciledAt: this.lastReconciledAtValue,
       version: this.version,
       createdAt: this.createdAt,
       updatedAt: this.updatedAtValue,
     };
+  }
+
+  /** Reservations created or changed since the program was created or loaded: what a save writes. */
+  changedReservations(): ReservationMemento[] {
+    const changed: ReservationMemento[] = [];
+
+    for (const invoiceId of this.changedInvoiceIds) {
+      const reservation = this.reservations.get(invoiceId);
+      if (reservation !== undefined) {
+        changed.push(reservation.toMemento());
+      }
+    }
+
+    return changed;
   }
 
   get creditLimit(): Money {
@@ -222,27 +292,14 @@ export class Program {
   }
 
   get activeReservationCount(): number {
-    let count = 0;
-
-    for (const reservation of this.reservations.values()) {
-      if (reservation.isActive) {
-        count += 1;
-      }
-    }
-
-    return count;
+    return this.activeReservationCountValue;
   }
 
+  /** @throws ReservationsNotLoadedError when the invoice is outside the loaded scope. */
   findReservation(invoiceId: string): Reservation | undefined {
-    return this.reservations.get(invoiceId);
-  }
+    this.assertLoaded(invoiceId);
 
-  /** All reservations, oldest first. */
-  listReservations(): Reservation[] {
-    return [...this.reservations.values()].sort(
-      (a, b) =>
-        a.reservedAt.getTime() - b.reservedAt.getTime() || a.invoiceId.localeCompare(b.invoiceId),
-    );
+    return this.reservations.get(invoiceId);
   }
 
   /**
@@ -264,7 +321,7 @@ export class Program {
       );
     }
 
-    const existing = this.reservations.get(input.invoiceId);
+    const existing = this.findReservation(input.invoiceId);
     if (existing !== undefined) {
       if (existing.invoiceAmount.equals(input.invoiceAmount)) {
         return { reservation: existing, created: false };
@@ -295,8 +352,9 @@ export class Program {
       at: input.at,
     });
 
-    this.reservations.set(reservation.invoiceId, reservation);
+    this.put(reservation);
     this.reservedTotalValue = this.reservedTotalValue.add(reservedAmount);
+    this.activeReservationCountValue += 1;
     this.touch(input.at);
 
     return { reservation, created: true };
@@ -304,7 +362,7 @@ export class Program {
 
   /** Releases a reservation, giving its capacity back. Idempotent: releasing twice is a no-op. */
   release(input: { invoiceId: string; at: Date }): ReleaseReservationResult {
-    const existing = this.reservations.get(input.invoiceId);
+    const existing = this.findReservation(input.invoiceId);
     if (existing === undefined) {
       throw new ReservationNotFoundError(this.id, input.invoiceId);
     }
@@ -313,8 +371,9 @@ export class Program {
     }
 
     const released = existing.release(input.at);
-    this.reservations.set(released.invoiceId, released);
+    this.put(released);
     this.reservedTotalValue = this.reservedTotalValue.subtract(released.reservedAmount);
+    this.activeReservationCountValue -= 1;
     this.touch(input.at);
 
     return { reservation: released, released: true };
@@ -341,6 +400,9 @@ export class Program {
    * Treasury wins for everything it knew at `asOf`. Reservations this service changed after
    * `asOf` are newer facts than the snapshot and are kept as they are; the next snapshot will
    * confirm or correct them. Active reservations missing from the snapshot are released.
+   *
+   * Only reservations the snapshot can affect take part: the active ones and those it names.
+   * A released reservation it does not name stays released, so the history is never read.
    */
   reconcile(snapshot: TreasurySnapshot, at: Date): ReconciliationResult {
     if (this.isStaleTreasurySequence(snapshot.sequence)) {
@@ -349,6 +411,7 @@ export class Program {
     this.assertProgramCurrency(snapshot.creditLimit, 'Credit limit');
     Program.assertValidCreditLimit(snapshot.creditLimit);
     this.assertValidSnapshotEntries(snapshot.activeReservations);
+    this.assertLoadedForReconciliation(snapshot);
 
     const counters = { ...NO_RECONCILIATION_CHANGES } as {
       -readonly [K in keyof typeof NO_RECONCILIATION_CHANGES]: number;
@@ -373,6 +436,7 @@ export class Program {
           entry.invoiceId,
           Reservation.fromTreasurySnapshot({ ...entry, asOf: snapshot.asOf }),
         );
+        this.changedInvoiceIds.add(entry.invoiceId);
         counters.added += 1;
       } else if (local.matches(entry.invoiceAmount, entry.reservedAmount)) {
         next.set(entry.invoiceId, local);
@@ -382,6 +446,7 @@ export class Program {
           entry.invoiceId,
           local.correctedBySnapshot(entry.invoiceAmount, entry.reservedAmount, snapshot.asOf),
         );
+        this.changedInvoiceIds.add(entry.invoiceId);
         counters.updated += 1;
       }
     }
@@ -392,6 +457,7 @@ export class Program {
       }
       if (local.isActive) {
         next.set(invoiceId, local.release(snapshot.asOf));
+        this.changedInvoiceIds.add(invoiceId);
         counters.released += 1;
       } else {
         next.set(invoiceId, local);
@@ -399,7 +465,7 @@ export class Program {
     }
 
     this.reservations = next;
-    this.reservedTotalValue = this.sumActiveReservations();
+    this.recountActiveReservations();
     this.creditLimitValue = snapshot.creditLimit;
     this.lastTreasurySequenceValue = snapshot.sequence;
     this.lastReconciledAtValue = snapshot.asOf;
@@ -408,16 +474,40 @@ export class Program {
     return { outcome: 'APPLIED', ...counters };
   }
 
-  private sumActiveReservations(): Money {
+  /** Every active reservation is loaded when this runs (see `reconcile`), so the sums are complete. */
+  private recountActiveReservations(): void {
     let total = Money.zero(this.currency);
+    let count = 0;
 
     for (const reservation of this.reservations.values()) {
       if (reservation.isActive) {
         total = total.add(reservation.reservedAmount);
+        count += 1;
       }
     }
 
-    return total;
+    this.reservedTotalValue = total;
+    this.activeReservationCountValue = count;
+  }
+
+  private put(reservation: Reservation): void {
+    this.reservations.set(reservation.invoiceId, reservation);
+    this.changedInvoiceIds.add(reservation.invoiceId);
+  }
+
+  private assertLoaded(invoiceId: string): void {
+    if (!this.coverage.complete && !this.coverage.invoiceIds.has(invoiceId)) {
+      throw new ReservationsNotLoadedError(this.id, `the reservation of invoice "${invoiceId}"`);
+    }
+  }
+
+  private assertLoadedForReconciliation(snapshot: TreasurySnapshot): void {
+    if (!this.coverage.complete && !this.coverage.allActive) {
+      throw new ReservationsNotLoadedError(this.id, 'its active reservations');
+    }
+    for (const entry of snapshot.activeReservations) {
+      this.assertLoaded(entry.invoiceId);
+    }
   }
 
   private isStaleTreasurySequence(sequence: number): boolean {
@@ -475,39 +565,4 @@ export class Program {
   private touch(at: Date): void {
     this.updatedAtValue = at;
   }
-}
-
-function toReservationMemento(reservation: Reservation): ReservationMemento {
-  return {
-    invoiceId: reservation.invoiceId,
-    invoiceAmount: reservation.invoiceAmount.toDecimalString(),
-    invoiceCurrency: reservation.invoiceAmount.currency.code,
-    reservedAmount: reservation.reservedAmount.toDecimalString(),
-    exchangeRate: reservation.exchangeRate?.toDecimalString() ?? null,
-    status: reservation.status,
-    reservedAt: reservation.reservedAt,
-    releasedAt: reservation.releasedAt,
-    updatedAt: reservation.updatedAt,
-  };
-}
-
-function toReservationProps(
-  memento: ReservationMemento,
-  programCurrency: Currency,
-): ReservationProps {
-  const invoiceCurrency = Currency.parse(memento.invoiceCurrency);
-
-  return {
-    invoiceId: memento.invoiceId,
-    invoiceAmount: Money.parse(memento.invoiceAmount, invoiceCurrency),
-    reservedAmount: Money.parse(memento.reservedAmount, programCurrency),
-    exchangeRate:
-      memento.exchangeRate === null
-        ? null
-        : ExchangeRate.parse(invoiceCurrency, programCurrency, memento.exchangeRate),
-    status: memento.status,
-    reservedAt: memento.reservedAt,
-    releasedAt: memento.releasedAt,
-    updatedAt: memento.updatedAt,
-  };
 }

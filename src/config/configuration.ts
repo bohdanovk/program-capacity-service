@@ -35,6 +35,8 @@ export function loadAppConfig(raw: Record<string, unknown> = process.env): AppCo
       brokers: splitList(env.KAFKA_BROKERS),
       clientId: env.KAFKA_CLIENT_ID,
       groupId: env.KAFKA_GROUP_ID,
+      maxAttempts: env.KAFKA_MAX_ATTEMPTS,
+      retryBackoffMs: env.KAFKA_RETRY_BACKOFF_MS,
     },
     swagger: { enabled: env.SWAGGER_ENABLED },
   };

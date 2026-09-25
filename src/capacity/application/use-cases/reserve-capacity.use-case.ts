@@ -7,6 +7,7 @@ import { FX_RATE_PROVIDER } from '../../domain/ports/fx-rate-provider';
 import type { FxRateProvider } from '../../domain/ports/fx-rate-provider';
 import { PROGRAM_REPOSITORY } from '../../domain/ports/program.repository';
 import type { ProgramRepository } from '../../domain/ports/program.repository';
+import { invoiceScope } from '../../domain/program';
 import { ReserveCapacityCommand } from '../commands';
 import { withConcurrencyRetry } from '../concurrency';
 import { parseMoneyInput } from '../money-input';
@@ -31,7 +32,11 @@ export class ReserveCapacityUseCase {
     const invoiceAmount = parseMoneyInput(command.invoiceAmount);
 
     return withConcurrencyRetry(async () => {
-      const program = await requireProgram(this.programs, command.programId);
+      const program = await requireProgram(
+        this.programs,
+        command.programId,
+        invoiceScope(command.invoiceId),
+      );
       const exchangeRate = await this.rateFor(invoiceAmount.currency, program.currency);
       const result = program.reserve({
         invoiceId: command.invoiceId,

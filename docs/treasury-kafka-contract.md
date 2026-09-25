@@ -4,13 +4,14 @@ The treasury system is the system of record for programs and their credit limits
 publishes to one topic; this service consumes it and applies every message through the
 same application layer the HTTP API uses.
 
-| Item     | Value                                                                                  |
-| -------- | -------------------------------------------------------------------------------------- |
-| Topic    | `treasury.program-capacity.v1` (version in the name; breaking changes get a new topic) |
-| Key      | `programId` (UTF-8). Guarantees per-program ordering within a partition.               |
-| Value    | JSON, UTF-8. Amounts are decimal **strings**, never numbers.                           |
-| Delivery | At least once. Every message is idempotent under the sequence guard below.             |
-| Consumer | Group `KAFKA_GROUP_ID`; a group with no committed offset reads from the beginning.     |
+| Item     | Value                                                                                       |
+| -------- | ------------------------------------------------------------------------------------------- |
+| Topic    | `treasury.program-capacity.v1` (version in the name; breaking changes get a new topic)      |
+| Key      | `programId` (UTF-8). Guarantees per-program ordering within a partition.                    |
+| Value    | JSON, UTF-8. Amounts are decimal **strings**, never numbers.                                |
+| Delivery | At least once. Every message is idempotent under the sequence guard below.                  |
+| Consumer | Group `KAFKA_GROUP_ID`; a group with no committed offset reads from the beginning.          |
+| Failures | Copied to `treasury.program-capacity.v1.dlq` (see [Dead-letter topic](#dead-letter-topic)). |
 
 ## Envelope
 
@@ -94,12 +95,40 @@ resulting active reservations, and `lastReconciledAt` is set to `occurredAt`.
 
 ## What the consumer does with each message
 
-| Outcome           | When                                                                                                                                                                                                    | Offset        |
-| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------- |
-| APPLIED / CREATED | Valid message with `sequence` greater than the last applied one.                                                                                                                                        | Committed     |
-| STALE             | `sequence` at or below the last applied sequence for the program (duplicate or out of order). Logged, nothing changes.                                                                                  | Committed     |
-| Dropped           | Poison message: fails validation, unsupported currency, currency differs from the program's, malformed snapshot (duplicate invoice, non-positive amount). Logged with topic, partition, offset and key. | Committed     |
-| Redelivered       | Transient failure (store unavailable, optimistic lock lost to API traffic after retries). Error rethrown; kafkajs retries with back-off.                                                                | Not committed |
+| Outcome           | When                                                                                                                                                                                                            | Offset        |
+| ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------- |
+| APPLIED / CREATED | Valid message with `sequence` greater than the last applied one.                                                                                                                                                | Committed     |
+| STALE             | `sequence` at or below the last applied sequence for the program (duplicate or out of order). Logged, nothing changes.                                                                                          | Committed     |
+| Retried           | Any failure that is not poison (store unavailable, optimistic lock lost to API traffic, an unclassified error). Retried in place after 0.5 s, 1 s, 2 s, ... (`KAFKA_RETRY_BACKOFF_MS`, doubling, at most 10 s). | Not yet       |
+| Dead-lettered     | Poison message (fails validation, unsupported currency, currency differs from the program's, malformed snapshot), at once; or any other failure after `KAFKA_MAX_ATTEMPTS` attempts. Logged at ERROR.           | Committed     |
+| Redelivered       | The dead-letter topic cannot take the message, or the consumer lost the partition (rebalance, shutdown) while retrying. Nothing is skipped; kafkajs delivers it again.                                          | Not committed |
+
+Retries happen inside the consumer, so the partition waits for them and a program's messages
+are never applied out of order. After a message is dead-lettered the partition moves on; a
+later message for the same program has a higher `sequence` and supersedes it.
+
+## Dead-letter topic
+
+`treasury.program-capacity.v1.dlq`, provisioned with the same partition count as the source
+topic. Each record is the original message, its key, value and headers byte for byte as
+delivered (a repeated header stays repeated), plus:
+
+| Header                 | Meaning                                                                                      |
+| ---------------------- | -------------------------------------------------------------------------------------------- |
+| `dlq-reason`           | `POISON` (can never succeed) or `RETRIES_EXHAUSTED` (kept failing).                          |
+| `dlq-attempts`         | How many times the message was processed before giving up.                                   |
+| `dlq-error`            | The last error, as logged (at most 1,000 characters).                                        |
+| `dlq-source-topic`     | Topic the message was read from.                                                             |
+| `dlq-source-partition` | Its partition.                                                                               |
+| `dlq-source-offset`    | Its offset: together with topic and partition, the way to find it again.                     |
+| `dlq-consumer-group`   | The consumer group that gave up on it: `KAFKA_GROUP_ID` plus the `-server` suffix Nest adds. |
+
+Nothing consumes this topic automatically. Once the cause is fixed, a message is replayed by
+producing its key and value back onto `treasury.program-capacity.v1`; if newer messages for
+the program have been applied in the meantime, the replay is logged as `STALE` and changes
+nothing, which is the intended result. A consumer group that replays the source topic from
+the beginning dead-letters the same poison messages again; `dlq-consumer-group` and
+`dlq-source-offset` tell the copies apart.
 
 ## Guidance for producers
 

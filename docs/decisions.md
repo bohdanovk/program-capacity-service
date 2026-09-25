@@ -53,10 +53,12 @@ Reserving and releasing happen inside that object, and the whole object is saved
 reservation at the same time. Keeping them in one object means the rule is checked and saved
 as one step, so no request can see a half-updated program.
 
-**In practice.** PostgreSQL stores the aggregate as JSONB in one `programs` row with a
-version column. One statement saves all reservations and totals together. Both stores load
-and save the whole program, including all reservations. This keeps the existing consistency
-boundary, but read and write costs grow with the program's reservation history.
+**In practice.** The store already has that shape: one record per program plus one per
+reservation, written together. A request loads the program record and only the reservations
+it concerns (decision 22), so "one unit" is about consistency, not about reading everything.
+PostgreSQL stores one `programs` row plus a `reservations` table, written in one transaction.
+The program record and its requested reservations are read in one statement, so they come
+from the same database snapshot.
 
 ## 5. Two simultaneous requests cannot both take the last capacity
 
@@ -120,36 +122,50 @@ replays are normal. The sequence number makes them harmless.
 **In practice.** Restarting the consumer under a new group name replays the whole topic and
 rebuilds the state, and nothing is applied twice.
 
-## 9. Broken messages are dropped and logged; temporary failures are retried
+## 9. Failed messages are retried a bounded number of times, then dead-lettered
 
 **What we do.** A message that can never be processed (malformed, unknown currency, a
-snapshot that contradicts the program) is logged with its topic, partition, offset and key,
-and then acknowledged so the topic keeps flowing. Any other failure, such as storage being
-briefly unavailable, is not acknowledged, so Kafka delivers the message again.
+snapshot that contradicts the program) is copied to the dead-letter topic
+`treasury.program-capacity.v1.dlq` at once. Any other failure, such as storage being briefly
+unavailable or an error nobody has classified, is retried in place with growing waits (0.5 s,
+1 s, 2 s, 4 s by default) up to `KAFKA_MAX_ATTEMPTS` attempts, and then dead-lettered as well.
+Either way the message is acknowledged afterwards and the partition moves on. The
+dead-letter copy keeps the key, value and headers byte for byte as delivered (Nest decodes
+messages for handlers, so the service keeps the delivered bytes alongside) and adds headers
+with the reason, the number of attempts, the error and where the message came from.
 
-**Why.** Retrying a message that will always fail blocks every message behind it forever.
-Dropping a message that would have succeeded a second later loses data. The two cases need
-opposite treatment.
+**Why.** Retrying a message that will always fail blocks every message behind it forever,
+and so does retrying a message whose failure nobody anticipated. Dropping a message that
+would have succeeded a second later loses data. A bounded retry covers the short outage; the
+dead-letter topic makes sure that what is given up on is kept, not lost.
 
-**In practice.** Production adds a "dead letter" topic where the dropped messages are sent
-for inspection. The decision is made in one place, `TreasuryMessageExceptionFilter`.
+**In practice.** Retries happen inside the consumer, so the partition waits and every
+program's messages stay in order; the consumer sends a heartbeat before each retry so the
+group does not drop it. Skipping a message does not corrupt anything: a later message for
+the same program carries a higher sequence and supersedes it, and the next snapshot heals any
+drift. The only case where a message is left unacknowledged for Kafka to deliver again is
+when the dead-letter topic itself cannot take it, because then nothing may be skipped. A
+message is replayed by copying it from the dead-letter topic back onto the source topic once
+the cause is fixed. Retries live in `TreasuryRetryInterceptor`; the final decision is made in
+one place, `TreasuryMessageExceptionFilter`.
 
 ## 10. PostgreSQL is the default store, with memory as an explicit option
 
 **What we do.** `STORE=postgres` is the default. `PostgresProgramRepository` uses `pg` and
-stores each aggregate in a JSONB row. `STORE=memory` selects `InMemoryProgramRepository`.
+stores program state and reservations in separate JSONB rows. `STORE=memory` selects `InMemoryProgramRepository`.
 Both implement `ProgramRepository`; application and domain code share the same interface.
 
 **Why.** PostgreSQL preserves state across restarts and coordinates multiple instances.
-The existing port reads and writes whole aggregates, so one row provides an atomic save
-without coordinating separate program and reservation writes. JSONB preserves the memento's
-decimal strings; the adapter restores dates when reading. Memory remains useful for tests
-and demos that need no database.
+The repository loads only the reservations a request needs. Each save writes the program
+record and changed reservations in one transaction after checking the version. JSONB
+preserves the memento's decimal strings; the adapter restores dates when reading. Generated
+reservation columns provide indexed lookup by invoice, status and reservation time. Memory
+remains useful for tests and demos that need no database.
 
 **In practice.** `PersistenceModule` selects the adapter from validated configuration.
 Apply `database/schema.sql` before starting against an existing database. Docker Compose
 applies it on first initialization and keeps data in a named volume. Startup checks database
-connectivity and the table; shutdown closes the pool. Memory mode loses state on restart.
+connectivity and both tables; shutdown closes the pool. Memory mode loses state on restart.
 
 ## 11. API keys with read and write permissions
 
@@ -237,9 +253,11 @@ and page 1000, stays correct while rows are being inserted, and is a plain `WHER
 
 **In practice.** The cursor is opaque to clients and tagged with the list it belongs to, so
 a cursor from one endpoint is refused by another. Both the program list and the reservation
-list use the same cursor format. PostgreSQL pages programs using an indexed id query with
-`C` collation, matching memory's ordering for the ASCII identifiers accepted by the API.
-Reservation lists page inside the loaded program with both stores, as described in decision 4.
+list use the same shared module. The in-memory store keeps each list in a `sorted-btree` B+ tree
+(programs by id; reservations by time, as a whole and per status), so finding a cursor is a
+walk down a few levels and a page is `limit` entries read along the leaves, just as a database
+index serves it. A database adapter pages the `reservations` table with the same keyset
+query, and the HTTP contract does not change.
 
 ## 18. The list of supported currencies is also the type
 
@@ -277,8 +295,12 @@ a 400, not corrected, because a payments API should not guess what the caller me
 - **Poison message.** A message that will fail no matter how often it is retried
   (decision 9).
 - **Scope.** A permission attached to an API key, `read` or `write`.
-- **Memento.** The plain-data copy of a program that the store keeps and the aggregate is
-  rebuilt from.
+- **Memento.** The plain-data copy of a program or a reservation that the store keeps and
+  the aggregate is rebuilt from.
+- **Reservation scope.** Which reservations to load with a program for one request
+  (decision 22).
+- **Dead-letter topic.** A Kafka topic where messages that could not be processed are kept,
+  with the reason, instead of being dropped or blocking the ones behind them (decision 9).
 
 ## 19. Security headers on every response, without a Content Security Policy
 
@@ -317,3 +339,37 @@ to start without `API_KEYS`. Dependabot proposes dependency updates weekly.
 **Why.** A gate that only runs on a developer's machine is a convention, not a guarantee.
 Building an image proves the Dockerfile; starting it proves the image, the environment
 contract and the fail-fast behaviour together.
+
+## 22. A request loads only the reservations it touches
+
+**What we do.** The program record stores its reserved total and its number of active
+reservations, and each reservation is stored as its own record. Reserving, releasing or
+reading one invoice loads the program record and that invoice's reservation only. Reading
+capacity or applying a limit change loads no reservation at all. A treasury snapshot loads the
+active reservations plus the ones it names. Saving writes the program record and only the
+reservations that changed.
+
+**Why.** Reservations are never deleted; a released one stays as history. Loading and saving
+all of them on every request made each request slower as the program grew, and building a
+program up slower still (quadratic), with Node's single thread blocked meanwhile. Storing
+the totals and loading only the relevant reservations bounds the number of records each
+reserve, release or capacity request needs, regardless of history size.
+
+Loading less is only half of it: the lists clients page through (all reservations, active,
+released) must stay in order as reservations are added and released. A sorted array does that
+by shifting every later entry, which is again proportional to the history. The lists use
+[`sorted-btree`](https://github.com/qwertie/btree-typescript), whose inserts, removals and cursor
+lookups take logarithmic time in memory. PostgreSQL uses matching indexes on the reservation
+table. The library maintains the in-memory trees; a small `OrderedIndex`
+adapter supplies our sort-key comparison and exclusive cursor pagination. This keeps tree
+balancing and node storage out of the service's code.
+
+**In practice.** The program still checks its rule ("active reservations may not exceed the
+limit") in one place, now against the stored total. A program loaded for one invoice refuses
+to answer about another instead of pretending it does not exist: otherwise an invoice that
+was already repaid would look new and could be reserved a second time. A snapshot does not
+read released reservations it does not name, because it leaves them as they are. A test counts
+the records each kind of request reads and writes on a program with 5,000 reservations, plus
+key comparisons and index entries visited. These checks catch full scans without depending
+on elapsed time. Internal moves inside the library are not counted. The index tests also
+check pages deep in a 100,000-entry collection to catch iteration from the beginning.

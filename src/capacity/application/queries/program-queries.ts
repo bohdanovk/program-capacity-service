@@ -1,15 +1,10 @@
 import { Inject, Injectable } from '@nestjs/common';
-import {
-  compareSortKeys,
-  Page,
-  PageRequest,
-  paginateSorted,
-  SortKey,
-} from '../../../shared/pagination/pagination';
+import { Page, PageRequest } from '../../../shared/pagination/pagination';
 import { ReservationNotFoundError } from '../../domain/errors';
 import { PROGRAM_REPOSITORY } from '../../domain/ports/program.repository';
 import type { ProgramRepository } from '../../domain/ports/program.repository';
-import { Reservation, ReservationStatus } from '../../domain/reservation';
+import { invoiceScope } from '../../domain/program';
+import { ReservationStatus } from '../../domain/reservation';
 import { requireProgram } from '../program-loader';
 import {
   ProgramCapacityView,
@@ -17,14 +12,6 @@ import {
   toProgramCapacityView,
   toReservationView,
 } from '../views/views';
-
-const RESERVATION_CURSOR = 'reservations';
-
-/** Oldest first; the invoice id breaks ties so the order is total and the cursor unambiguous. */
-const reservationSortKey = (reservation: Reservation): SortKey => [
-  reservation.reservedAt.toISOString(),
-  reservation.invoiceId,
-];
 
 /** Read side. Reads go through the same repository; a dedicated read store is a drop-in later. */
 @Injectable()
@@ -41,34 +28,23 @@ export class ProgramQueries {
     return toProgramCapacityView(await requireProgram(this.programs, programId));
   }
 
-  /**
-   * Reservations are paged inside the loaded aggregate for both persistence adapters.
-   */
+  /** Oldest first; the invoice id breaks ties so the order is total and the cursor unambiguous. */
   async listReservations(
     programId: string,
     request: PageRequest,
     status?: ReservationStatus,
   ): Promise<Page<ReservationView>> {
-    const program = await requireProgram(this.programs, programId);
-    const sorted = program
-      .listReservations()
-      .filter((reservation) => status === undefined || reservation.status === status)
-      .sort((a, b) => compareSortKeys(reservationSortKey(a), reservationSortKey(b)));
-    const page = paginateSorted({
-      kind: RESERVATION_CURSOR,
-      sorted,
-      request,
-      keyOf: reservationSortKey,
-    });
+    await requireProgram(this.programs, programId);
+    const page = await this.programs.findReservationPage(programId, request, status);
 
     return {
       ...page,
-      items: page.items.map((reservation) => toReservationView(program.id, reservation)),
+      items: page.items.map((reservation) => toReservationView(programId, reservation)),
     };
   }
 
   async getReservation(programId: string, invoiceId: string): Promise<ReservationView> {
-    const program = await requireProgram(this.programs, programId);
+    const program = await requireProgram(this.programs, programId, invoiceScope(invoiceId));
     const reservation = program.findReservation(invoiceId);
 
     if (reservation === undefined) {

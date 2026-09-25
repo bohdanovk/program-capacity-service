@@ -79,6 +79,20 @@ export class EnvironmentVariables {
   @IsNotEmpty()
   KAFKA_GROUP_ID = 'program-capacity-service';
 
+  /** Attempts a treasury message gets before it is dead-lettered. Poison messages get one. */
+  @Transform(({ value }) => coerceInteger(value))
+  @IsInt()
+  @Min(1)
+  @Max(10)
+  KAFKA_MAX_ATTEMPTS = 5;
+
+  /** Wait before the first retry of a treasury message; doubles for each further one, capped at 10 s. */
+  @Transform(({ value }) => coerceInteger(value))
+  @IsInt()
+  @Min(0)
+  @Max(10000)
+  KAFKA_RETRY_BACKOFF_MS = 500;
+
   @Transform(({ value }) => coerceBoolean(value))
   @IsBoolean()
   SWAGGER_ENABLED = true;

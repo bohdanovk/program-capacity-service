@@ -24,6 +24,10 @@ export interface KafkaConfig {
   readonly brokers: readonly string[];
   readonly clientId: string;
   readonly groupId: string;
+  /** Attempts per treasury message before it goes to the dead-letter topic. */
+  readonly maxAttempts: number;
+  /** Wait before the first retry; doubled for each further one. */
+  readonly retryBackoffMs: number;
 }
 
 export interface AppConfig {
