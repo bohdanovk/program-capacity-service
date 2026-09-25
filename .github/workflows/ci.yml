@@ -14,6 +14,20 @@ jobs:
   check:
     name: Format, lint, types, tests
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: capacity
+          POSTGRES_PASSWORD: capacity
+          POSTGRES_DB: capacity
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -h 127.0.0.1 -U capacity -d capacity"
+          --health-interval 2s --health-timeout 5s --health-retries 15
+    env:
+      TEST_DATABASE_URL: postgresql://capacity:capacity@localhost:5432/capacity
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -31,21 +45,34 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - run: docker build -t program-capacity-service:ci .
+      - name: Start PostgreSQL
+        run: docker compose up -d --wait postgres
       - name: Smoke test
         run: |
-          docker run -d --name service -p 3000:3000 \
+          docker run -d --name service --network host \
             -e API_KEYS='ci:ci-key-0123456789abcdef:read+write' \
+            -e DATABASE_URL='postgresql://capacity:capacity@localhost:5432/capacity' \
             program-capacity-service:ci
           for i in $(seq 1 30); do
             curl -sf localhost:3000/health >/dev/null && break
             sleep 1
           done
           curl -sf localhost:3000/health
+          curl -sf -X POST localhost:3000/api/v1/programs \
+            -H 'x-api-key: ci-key-0123456789abcdef' -H 'content-type: application/json' \
+            -d '{"programId":"CI-PERSISTED","creditLimit":{"amount":"100.00","currency":"USD"}}'
+          docker restart service
+          for i in $(seq 1 30); do
+            curl -sf localhost:3000/health >/dev/null && break
+            sleep 1
+          done
+          curl -sf localhost:3000/api/v1/programs/CI-PERSISTED \
+            -H 'x-api-key: ci-key-0123456789abcdef'
           echo
           docker logs service
           docker rm -f service
       - name: Refuses to start without API keys
         run: |
           set +e
-          docker run --rm program-capacity-service:ci
+          docker run --rm -e STORE=memory program-capacity-service:ci
           test $? -ne 0

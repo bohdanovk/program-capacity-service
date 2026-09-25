@@ -42,8 +42,7 @@ export class ProgramQueries {
   }
 
   /**
-   * Reservations are paged inside the loaded aggregate. A database adapter runs the same
-   * keyset query against the reservations table instead; the HTTP contract does not change.
+   * Reservations are paged inside the loaded aggregate for both persistence adapters.
    */
   async listReservations(
     programId: string,

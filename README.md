@@ -7,28 +7,32 @@ HTTP API, exposes current availability, and stays in line with the treasury syst
 Kafka feed of limit changes and periodic full-state snapshots. Programs and invoices may be in
 different currencies.
 
-Stack: TypeScript 5.9, Nest.js 11, Jest, kafkajs via `@nestjs/microservices`, OpenAPI via
+Stack: TypeScript 5.9, Nest.js 11, PostgreSQL via `pg`, Jest, kafkajs via `@nestjs/microservices`, OpenAPI via
 `@nestjs/swagger`. Architecture: DDD with hexagonal layering, enforced by lint.
 
 ## Quick start
 
-Prerequisites: Node 22+, npm, Docker (only for Kafka).
+Prerequisites: Node 22+, npm, Docker for local PostgreSQL and Kafka.
 
 ```bash
 npm install
+npm run db:up           # PostgreSQL on :5432, schema created on first start
 npm run start:dev       # API on :3000, OpenAPI UI on /docs
 ```
 
 No configuration file is needed. The configuration contract is a schema
-(`src/config/environment.ts`); in development it fills in two dev API keys and a few FX
-rates and says so in the first log line. Anything else, and every value in test or
-production, comes from the environment (a `.env` file is honoured if present). The service
-refuses to start when the environment does not satisfy the schema.
+(`src/config/environment.ts`); development supplies a local database URL, two dev API keys
+and a few FX rates, and logs which defaults it used. Environment variables override these
+values; a `.env` file is honoured if present. Test and production require explicit API keys
+and a database URL when using PostgreSQL. Invalid configuration prevents startup.
+
+PostgreSQL is the default store. For an ephemeral service without a database, run
+`STORE=memory npm run start:dev`. Memory state is process-local and disappears on restart.
 
 With the treasury feed, everything runs in Docker from one terminal:
 
 ```bash
-docker compose --profile app up --build -d    # broker, topic, and the service on :3000
+docker compose --profile app up --build -d    # database, broker, topic, and the service on :3000
 npm run kafka:publish                          # limit set, snapshot, limit raised, a stale duplicate
 curl -s localhost:3000/api/v1/programs/PRG-001 -H 'x-api-key: local-admin-key-0123456789'
 docker compose --profile app logs app          # CREATED, APPLIED, APPLIED, STALE
@@ -38,11 +42,12 @@ For the feed against a locally running service instead: `npm run kafka:up`, then
 `KAFKA_ENABLED=true npm run start:dev`. `npm run kafka:publish -- PRG-002 --with-poison` adds
 a malformed message to show the poison-message path (logged at ERROR level and dropped; it
 stays in the topic, so every new consumer group replays and reports it). `npm run kafka:down`
-removes the broker and its data.
+stops Kafka without stopping PostgreSQL. `npm run db:down` stops PostgreSQL and keeps its data.
 
 Everything at once (format check, lint with architecture rules, type check, unit and e2e tests):
 
 ```bash
+npm run db:up
 npm run check
 ```
 
@@ -125,7 +130,8 @@ and never produced on the way out.
 Lists are keyset-paginated, the same way everywhere: `?limit=` (1 to 200, default 50) and an
 opaque `?cursor=`. A page is `{ "items": [...], "nextCursor": "..." | null, "limit": n }`;
 pass `nextCursor` back until it is null. A cursor from another list or from elsewhere is a 400
-`INVALID_CURSOR`. Nothing in the service ever loads a whole collection.
+`INVALID_CURSOR`. Program lists load one page from storage. Each program is loaded with its
+reservations; reservation lists paginate within that aggregate.
 
 Every response carries the standard security headers (`helmet`, no `X-Powered-By`) and the
 request id; every request produces one access-log line with method, path, status, duration,
@@ -152,7 +158,8 @@ src/
       queries/                    read side
       concurrency.ts              optimistic-lock retry
     infrastructure/               outbound adapters, one Nest module per port
-      persistence/                InMemoryProgramRepository (mementos + version check)
+      persistence/                PostgresProgramRepository (JSONB + atomic version check),
+                                  InMemoryProgramRepository (process-local mementos)
       fx/                         StaticFxRateProvider (rates from configuration)
       clock/                      SystemClock
     presentation/                 inbound adapters; both call the same use cases
@@ -232,15 +239,17 @@ those two are the point here (see decision 12).
 
 `src/config/environment.ts` is the contract: every variable with its type, constraints and
 default, validated at start-up. There is no template file to copy; a misconfigured service
-does not start, and the error names each offending variable. In development, `API_KEYS` and
-`FX_RATES` fall back to built-in values (logged at start-up) so a fresh clone runs unchanged.
-Test and production must set them.
+does not start, and the error names each offending variable. Development supplies local
+`API_KEYS`, `FX_RATES` and a `DATABASE_URL` matching Docker Compose. Test and production require
+explicit API keys and, when using PostgreSQL, a database URL. FX rates may be empty.
 
 | Variable          | Default                           | Meaning                                                                                                      |
 | ----------------- | --------------------------------- | ------------------------------------------------------------------------------------------------------------ |
 | `NODE_ENV`        | `development`                     | `production` switches logs to JSON                                                                           |
 | `PORT`            | `3000`                            |                                                                                                              |
 | `LOG_LEVEL`       | `log` in production, else `debug` | Least severe level to emit: `verbose`, `debug`, `log`, `warn`, `error`, `fatal`                              |
+| `STORE`           | `postgres`                        | `postgres` for durable shared state, `memory` for process-local state                                        |
+| `DATABASE_URL`    | local Compose URL in development  | PostgreSQL connection URL; required for the PostgreSQL store in test and production                          |
 | `API_KEYS`        | required                          | `name:secret:scope[+scope]`, comma separated. Secret 16+ chars of `[A-Za-z0-9._~-]`. Scopes `read`, `write`. |
 | `FX_RATES`        | empty                             | `BASE/QUOTE=rate`, comma separated, up to 10 decimals                                                        |
 | `KAFKA_ENABLED`   | `false`                           | Start the treasury consumer                                                                                  |
@@ -251,22 +260,55 @@ Test and production must set them.
 
 The topic name `treasury.program-capacity.v1` is part of the contract and therefore a constant.
 
+### PostgreSQL setup
+
+`npm run db:up` starts PostgreSQL 18 and applies [database/schema.sql](database/schema.sql)
+when initializing its data volume. The development URL is
+`postgresql://capacity:capacity@localhost:5432/capacity`. The Compose app uses the `postgres`
+hostname instead. The named volume survives container restarts and `docker compose down`.
+
+For an existing PostgreSQL server, create a database and apply the schema before starting
+the service. With the PostgreSQL client installed:
+
+```bash
+export DATABASE_URL='postgresql://user:password@db-host:5432/capacity'
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f database/schema.sql
+npm run start:prod
+```
+
+Production also requires `API_KEYS`. Use your provider's TLS settings in `DATABASE_URL`.
+Schema setup is explicit; the service checks the table at startup and refuses to start if
+the database or schema is unavailable. It closes its connection pool on shutdown.
+
+Each `programs` row holds an id, a version and JSONB aggregate state, including reservations.
+Money and FX rates remain decimal strings. An insert or version-checked update saves the
+entire aggregate atomically, so multiple service instances share the same concurrency
+protection. Program pagination uses the primary-key index and a deterministic `C` collation.
+Reading or updating a program includes all its reservations, matching the aggregate's
+current consistency boundary.
+
 ## Tests
 
-| Suite                                               | What it proves                                                                                                                            |
-| --------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| `domain/money.spec.ts`                              | Strict parsing, formatting, exactness beyond double precision, currency safety                                                            |
-| `domain/exchange-rate.spec.ts`                      | Rounding modes, mixed minor units (JPY, KWD), full-precision exactness                                                                    |
-| `domain/program.spec.ts`                            | Every aggregate rule: capacity boundary, idempotency, conflicts, release, limit changes, all reconciliation cases, persistence round trip |
-| `application/.../reserve-capacity.use-case.spec.ts` | No over-allocation under concurrent requests, through the real repository                                                                 |
-| `presentation/kafka/...message.dto.spec.ts`         | The Kafka wire contract rejects what it must                                                                                              |
-| `test/capacity.e2e-spec.ts`                         | Authentication and scopes, error envelope, the whole lifecycle over HTTP                                                                  |
+| Suite                                               | What it proves                                                                                                                               |
+| --------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `domain/money.spec.ts`                              | Strict parsing, formatting, exactness beyond double precision, currency safety                                                               |
+| `domain/exchange-rate.spec.ts`                      | Rounding modes, mixed minor units (JPY, KWD), full-precision exactness                                                                       |
+| `domain/program.spec.ts`                            | Every aggregate rule: capacity boundary, idempotency, conflicts, release, limit changes, all reconciliation cases, persistence round trip    |
+| `application/.../reserve-capacity.use-case.spec.ts` | No over-allocation under concurrent requests, through the real repository                                                                    |
+| `presentation/kafka/...message.dto.spec.ts`         | The Kafka wire contract rejects what it must                                                                                                 |
+| `test/capacity.e2e-spec.ts`                         | Authentication and scopes, error envelope, the whole lifecycle over HTTP                                                                     |
+| `test/postgres.repository-spec.ts`                  | Persistence across connections, exact serialization, competing inserts and updates, capacity races, SQL pagination and startup schema checks |
 
 ```bash
 npm test            # unit
-npm run test:e2e    # HTTP end to end (no Kafka needed)
+npm run test:e2e    # HTTP end to end using memory (no infrastructure needed)
+npm run test:postgres # Repository and HTTP suites against PostgreSQL (no Kafka needed)
 npm run test:cov
 ```
+
+PostgreSQL tests use the local Compose database by default, or `TEST_DATABASE_URL` when set.
+Each test file creates and removes its own schema, so service tables stay untouched. The test
+database user needs permission to create schemas. `npm run check` runs both stores' suites.
 
 Controllers, mappers and Nest modules have no isolated unit tests on purpose: the e2e suite
 exercises them, and mocking them apart would only restate their code.
@@ -277,11 +319,9 @@ The short list; each has a fuller record in [docs/decisions.md](docs/decisions.m
 
 1. Treasury is the system of record for programs and limits. `POST /programs` is a bootstrap
    for environments without the feed and is overridden by treasury.
-2. Reservation state lives in memory behind a repository port. This is a deliberate scope
-   choice for the exercise: the port, the version check and the mementos are shaped so a
-   database adapter drops in without touching domain or application code. Until then the
-   service is single-instance and loses state on restart (a fresh consumer group replays the
-   topic and treasury snapshots rebuild it).
+2. PostgreSQL stores reservation state by default. The repository port and optimistic
+   version check support multiple instances without changing the domain. Explicit memory
+   mode remains useful for tests and demos, but loses state on restart.
 3. FX rates are static configuration. A market-data or treasury-fed provider implements the
    same one-method port.
 4. Rounding up on conversion and "release what was reserved" are conservative choices a
@@ -296,9 +336,8 @@ The short list; each has a fuller record in [docs/decisions.md](docs/decisions.m
 
 ## What production would add next
 
-Database-backed repository (Postgres, `programs` + `reservations`, version column; the port
-and the version check are already shaped for it), a readiness probe that fails until storage
-and the consumer are up, Kafka credentials and TLS in the consumer options, secrets from a
+A readiness probe that checks storage and consumer connectivity after startup, Kafka
+credentials and TLS in the consumer options, secrets from a
 secrets manager, metrics (reservations per outcome, treasury messages per outcome, consumer
 lag), a dead-letter topic for dropped treasury messages, an outbox that publishes this
 service's reservations and releases back to treasury, and an identity provider for client
@@ -306,13 +345,16 @@ credentials.
 
 ## Scripts
 
-| Script                              | Purpose                                            |
-| ----------------------------------- | -------------------------------------------------- |
-| `npm run start:dev`                 | Watch mode                                         |
-| `npm run build`                     | Compile to `dist/`                                 |
-| `npm run start:prod`                | Run the compiled service                           |
-| `npm run check`                     | Format check, lint, type check, unit and e2e tests |
-| `npm run lint`                      | ESLint including architecture boundaries           |
-| `npm run kafka:up`                  | Start Kafka and create the topic                   |
-| `npm run kafka:publish [programId]` | Publish the sample treasury scenario               |
-| `npm run kafka:down`                | Stop Kafka                                         |
+| Script                              | Purpose                                                 |
+| ----------------------------------- | ------------------------------------------------------- |
+| `npm run start:dev`                 | Watch mode                                              |
+| `npm run build`                     | Compile to `dist/`                                      |
+| `npm run start:prod`                | Run the compiled service                                |
+| `npm run check`                     | Format check, lint, type check, unit and e2e tests      |
+| `npm run db:up`                     | Start PostgreSQL and initialize its schema on first use |
+| `npm run db:down`                   | Stop PostgreSQL, retaining data                         |
+| `npm run test:postgres`             | PostgreSQL repository tests and HTTP lifecycle          |
+| `npm run lint`                      | ESLint including architecture boundaries                |
+| `npm run kafka:up`                  | Start Kafka and create the topic                        |
+| `npm run kafka:publish [programId]` | Publish the sample treasury scenario                    |
+| `npm run kafka:down`                | Stop Kafka                                              |

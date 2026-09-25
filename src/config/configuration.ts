@@ -16,7 +16,10 @@ export function loadAppConfig(raw: Record<string, unknown> = process.env): AppCo
   if (defaulted.length > 0) {
     new Logger('Config').warn(
       `Development defaults in use for ${defaulted.join(', ')}: ` +
-        defaulted.map((name) => `${name}=${DEVELOPMENT_DEFAULTS[name] ?? ''}`).join(' '),
+        defaulted
+          .filter((name) => name !== 'DATABASE_URL')
+          .map((name) => `${name}=${DEVELOPMENT_DEFAULTS[name] ?? ''}`)
+          .join(' '),
     );
   }
 
@@ -24,6 +27,7 @@ export function loadAppConfig(raw: Record<string, unknown> = process.env): AppCo
     env: env.NODE_ENV,
     port: env.PORT,
     logLevel: env.LOG_LEVEL ?? defaultLogLevel(env.NODE_ENV),
+    persistence: { store: env.STORE, databaseUrl: env.DATABASE_URL },
     auth: { apiKeys: parseApiKeys(env.API_KEYS) },
     fx: { rates: parseFxRates(env.FX_RATES) },
     kafka: {

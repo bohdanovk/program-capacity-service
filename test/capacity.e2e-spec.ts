@@ -8,12 +8,13 @@ const ADMIN_KEY = 'e2e-admin-key-0123456789';
 const READER_KEY = 'e2e-reader-key-0123456789';
 
 describe('Capacity API (e2e)', () => {
-  let app: INestApplication;
+  let app: INestApplication | undefined;
   let http: ReturnType<typeof request>;
 
   beforeAll(async () => {
     Object.assign(process.env, {
       NODE_ENV: 'test',
+      STORE: process.env.TEST_STORE ?? 'memory',
       API_KEYS: `admin:${ADMIN_KEY}:read+write,reader:${READER_KEY}:read`,
       FX_RATES: 'EUR/USD=1.0850',
       KAFKA_ENABLED: 'false',
@@ -27,7 +28,7 @@ describe('Capacity API (e2e)', () => {
   });
 
   afterAll(async () => {
-    await app.close();
+    await app?.close();
   });
 
   describe('authentication', () => {

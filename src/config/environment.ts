@@ -6,22 +6,25 @@ import {
   IsNotEmpty,
   IsOptional,
   IsString,
+  IsUrl,
   Max,
   Min,
+  ValidateIf,
   validateSync,
 } from 'class-validator';
 import { coerceBoolean, coerceInteger } from '../shared/transform/coercion';
 import { LOG_LEVELS } from './app-config';
-import type { Environment, LogLevel } from './app-config';
+import type { Environment, LogLevel, Store } from './app-config';
 
 /**
  * Values assumed in development when the variable is absent, so a fresh clone runs with
- * `npm run start:dev` and nothing else. Test and production must set them explicitly.
+ * local infrastructure. Test and production must set them explicitly.
  */
 export const DEVELOPMENT_DEFAULTS: Readonly<Record<string, string>> = {
   API_KEYS:
     'dev-admin:dev-admin-key-0123456789:read+write,dev-reader:dev-reader-key-0123456789:read',
   FX_RATES: 'EUR/USD=1.0850,GBP/USD=1.2700,USD/EUR=0.9217,JPY/USD=0.0066889632',
+  DATABASE_URL: 'postgresql://capacity:capacity@localhost:5432/capacity',
 };
 
 /**
@@ -42,6 +45,13 @@ export class EnvironmentVariables {
   @IsOptional()
   @IsIn(LOG_LEVELS)
   LOG_LEVEL?: LogLevel;
+
+  @IsIn(['postgres', 'memory'])
+  STORE: Store = 'postgres';
+
+  @ValidateIf((env: EnvironmentVariables) => env.STORE === 'postgres')
+  @IsUrl({ protocols: ['postgres', 'postgresql'], require_protocol: true, require_tld: false })
+  DATABASE_URL?: string;
 
   /** `name:secret:scope[+scope]` entries separated by commas, e.g. `ops:0123456789abcdef:read+write`. */
   @IsString()
@@ -106,6 +116,9 @@ function applyDevelopmentDefaults(raw: Record<string, unknown>): {
 
   if (isDevelopment) {
     for (const [name, value] of Object.entries(DEVELOPMENT_DEFAULTS)) {
+      if (name === 'DATABASE_URL' && values.STORE === 'memory') {
+        continue;
+      }
       if (values[name] === undefined || values[name] === '') {
         values[name] = value;
         defaulted.push(name);

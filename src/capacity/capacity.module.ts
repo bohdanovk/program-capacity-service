@@ -7,7 +7,7 @@ import { ReleaseReservationUseCase } from './application/use-cases/release-reser
 import { ReserveCapacityUseCase } from './application/use-cases/reserve-capacity.use-case';
 import { SystemClockModule } from './infrastructure/clock/system-clock.module';
 import { StaticFxModule } from './infrastructure/fx/static-fx.module';
-import { InMemoryPersistenceModule } from './infrastructure/persistence/in-memory-persistence.module';
+import { PersistenceModule } from './infrastructure/persistence/persistence.module';
 import { ProgramsController } from './presentation/http/programs.controller';
 import { ReservationsController } from './presentation/http/reservations.controller';
 import { TreasuryCapacityConsumer } from './presentation/kafka/treasury-capacity.consumer';
@@ -16,11 +16,10 @@ import { TreasuryCapacityConsumer } from './presentation/kafka/treasury-capacity
  * Bounded context: program capacity and invoice reservations.
  *
  * The imports bind each outbound port (repository, FX rates, clock) to one adapter module.
- * Replacing the in-memory store with a database is a matter of importing a different
- * persistence module here; nothing in application or domain changes.
+ * PersistenceModule selects the configured store without changing application or domain code.
  */
 @Module({
-  imports: [InMemoryPersistenceModule, StaticFxModule, SystemClockModule],
+  imports: [PersistenceModule, StaticFxModule, SystemClockModule],
   controllers: [ProgramsController, ReservationsController, TreasuryCapacityConsumer],
   providers: [
     CreateProgramUseCase,
