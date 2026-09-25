@@ -1,0 +1,10 @@
+{
+  "moduleFileExtensions": ["js", "json", "ts"],
+  "rootDir": ".",
+  "testEnvironment": "node",
+  "testMatch": ["**/capacity.e2e-spec.ts", "**/postgres.*-spec.ts"],
+  "setupFilesAfterEnv": ["<rootDir>/postgres.setup.ts"],
+  "transform": {
+    "^.+\\.(t|j)s$": "ts-jest"
+  }
+}

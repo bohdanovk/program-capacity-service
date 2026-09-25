@@ -21,9 +21,12 @@
     "test:watch": "jest --watch",
     "test:cov": "jest --coverage",
     "test:e2e": "jest --config ./test/jest-e2e.json",
-    "check": "npm run format:check && npm run lint && npm run typecheck && npm test && npm run test:e2e",
+    "test:postgres": "jest --config ./test/jest-postgres.json",
+    "check": "npm run format:check && npm run lint && npm run typecheck && npm test && npm run test:e2e && npm run test:postgres",
+    "db:up": "docker compose up -d --wait postgres",
+    "db:down": "docker compose stop postgres",
     "kafka:up": "docker compose up -d kafka kafka-init",
-    "kafka:down": "docker compose down",
+    "kafka:down": "docker compose stop kafka kafka-init",
     "kafka:publish": "ts-node scripts/publish-treasury-events.ts"
   },
   "dependencies": {
@@ -37,6 +40,7 @@
     "class-validator": "^0.15.1",
     "helmet": "^8.3.0",
     "kafkajs": "^2.2.4",
+    "pg": "^8.23.0",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.2"
   },
@@ -48,6 +52,7 @@
     "@types/express": "^5.0.6",
     "@types/jest": "^30.0.0",
     "@types/node": "^24.13.6",
+    "@types/pg": "^8.23.1",
     "@types/supertest": "^7.0.0",
     "eslint": "^10.11.0",
     "eslint-config-prettier": "^10.1.8",

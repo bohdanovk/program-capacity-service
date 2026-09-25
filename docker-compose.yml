@@ -1,6 +1,23 @@
 # Local infrastructure. `npm run kafka:up` starts the broker and creates the treasury topic.
 # `docker compose --profile app up --build` additionally runs the service itself.
 services:
+  postgres:
+    image: postgres:18-alpine
+    ports:
+      - '127.0.0.1:5432:5432'
+    environment:
+      POSTGRES_USER: capacity
+      POSTGRES_PASSWORD: capacity
+      POSTGRES_DB: capacity
+    volumes:
+      - postgres-data:/var/lib/postgresql
+      - ./database/schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -h 127.0.0.1 -U capacity -d capacity']
+      interval: 2s
+      timeout: 5s
+      retries: 15
+
   kafka:
     image: apache/kafka:4.1.0
     container_name: program-capacity-kafka
@@ -46,6 +63,8 @@ services:
     build: .
     profiles: ['app']
     depends_on:
+      postgres:
+        condition: service_healthy
       kafka-init:
         condition: service_completed_successfully
     ports:
@@ -53,8 +72,12 @@ services:
     environment:
       NODE_ENV: production
       PORT: 3000
+      DATABASE_URL: postgresql://capacity:capacity@postgres:5432/capacity
       API_KEYS: ${API_KEYS:-local-admin:local-admin-key-0123456789:read+write,local-reader:local-reader-key-0123456789:read}
       FX_RATES: ${FX_RATES:-EUR/USD=1.0850,GBP/USD=1.2700,USD/EUR=0.9217,JPY/USD=0.0066889632}
       KAFKA_ENABLED: 'true'
       KAFKA_BROKERS: kafka:29092
       SWAGGER_ENABLED: 'true'
+
+volumes:
+  postgres-data:

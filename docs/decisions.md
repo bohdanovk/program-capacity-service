@@ -53,10 +53,10 @@ Reserving and releasing happen inside that object, and the whole object is saved
 reservation at the same time. Keeping them in one object means the rule is checked and saved
 as one step, so no request can see a half-updated program.
 
-**In practice.** With a database this becomes one `programs` row plus a `reservations`
-table, written in one transaction. The domain code stays as it is. The known limit of the
-current in-memory design is that a program with very many reservations is loaded whole; a
-database adapter would load only what a request needs.
+**In practice.** PostgreSQL stores the aggregate as JSONB in one `programs` row with a
+version column. One statement saves all reservations and totals together. Both stores load
+and save the whole program, including all reservations. This keeps the existing consistency
+boundary, but read and write costs grow with the program's reservation history.
 
 ## 5. Two simultaneous requests cannot both take the last capacity
 
@@ -71,10 +71,10 @@ save. Without the version check the program would end up with 1000 reserved out 
 With it, the second save fails, the request sees 100 available, and answers 409
 `INSUFFICIENT_CAPACITY`, which is the true answer.
 
-**In practice.** This matters even on a single server. While one request waits for the
-storage to respond, another request can run. The in-memory store performs exactly the check
-a database would with `UPDATE ... WHERE version = ?`, and a test proves that two racing
-requests never over-allocate.
+**In practice.** PostgreSQL uses `UPDATE ... WHERE version = $3` and increments the version
+in that statement. Conflicting inserts also fail the concurrency check. Tests race separate
+database connections through the repository and use case. The memory store applies the same
+check within one process.
 
 ## 6. The invoice id protects against duplicates
 
@@ -134,18 +134,22 @@ opposite treatment.
 **In practice.** Production adds a "dead letter" topic where the dropped messages are sent
 for inspection. The decision is made in one place, `TreasuryMessageExceptionFilter`.
 
-## 10. Storage is in memory for now, behind an interface
+## 10. PostgreSQL is the default store, with memory as an explicit option
 
-**What we do.** Programs are kept in memory by an adapter that implements the
-`ProgramRepository` interface. Nothing outside that adapter knows where data lives.
+**What we do.** `STORE=postgres` is the default. `PostgresProgramRepository` uses `pg` and
+stores each aggregate in a JSONB row. `STORE=memory` selects `InMemoryProgramRepository`.
+Both implement `ProgramRepository`; application and domain code share the same interface.
 
-**Why.** The exercise asks for a runnable service, not a database deployment. The interface
-is designed so that a database adapter is a drop-in: it stores the same fields, and applies
-the same version check as decision 5.
+**Why.** PostgreSQL preserves state across restarts and coordinates multiple instances.
+The existing port reads and writes whole aggregates, so one row provides an atomic save
+without coordinating separate program and reservation writes. JSONB preserves the memento's
+decimal strings; the adapter restores dates when reading. Memory remains useful for tests
+and demos that need no database.
 
-**In practice.** Swapping storage means importing a different persistence module in
-`CapacityModule`. Until then the service runs as one instance and loses its state on
-restart; replaying the treasury topic rebuilds it (decision 8).
+**In practice.** `PersistenceModule` selects the adapter from validated configuration.
+Apply `database/schema.sql` before starting against an existing database. Docker Compose
+applies it on first initialization and keeps data in a named volume. Startup checks database
+connectivity and the table; shutdown closes the pool. Memory mode loses state on restart.
 
 ## 11. API keys with read and write permissions
 
@@ -215,8 +219,9 @@ built-in values, and the first log line says so.
 
 **Why.** A template file drifts from the code and cannot enforce anything. The schema
 refuses to start the service and names the offending variables. The development defaults
-mean a fresh clone runs with `npm run start:dev` alone; test and production must set the
-values, which is the point.
+match the local Compose database. Run `npm run db:up` before `npm run start:dev`, or select
+memory explicitly. Test and production require explicit API keys and a database URL when
+using PostgreSQL.
 
 ## 17. Lists are paged with a cursor, and nothing loads a whole table
 
@@ -232,9 +237,9 @@ and page 1000, stays correct while rows are being inserted, and is a plain `WHER
 
 **In practice.** The cursor is opaque to clients and tagged with the list it belongs to, so
 a cursor from one endpoint is refused by another. Both the program list and the reservation
-list use the same shared module. The reservation list is currently paged inside the loaded
-program, which is the limit described in decision 4; a database adapter would page the
-`reservations` table directly, and the HTTP contract would not change.
+list use the same cursor format. PostgreSQL pages programs using an indexed id query with
+`C` collation, matching memory's ordering for the ASCII identifiers accepted by the API.
+Reservation lists page inside the loaded program with both stores, as described in decision 4.
 
 ## 18. The list of supported currencies is also the type
 

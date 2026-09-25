@@ -25,6 +25,7 @@ async function bootstrap(): Promise<void> {
     }),
   );
   configureHttpApp(app);
+  app.enableShutdownHooks();
 
   const kafka = config.get('kafka', { infer: true });
   if (kafka.enabled) {

@@ -1,4 +1,5 @@
 export type Environment = 'development' | 'test' | 'production';
+export type Store = 'postgres' | 'memory';
 
 /** Nest log levels from least to most severe; a configured level enables itself and everything above. */
 export const LOG_LEVELS = ['verbose', 'debug', 'log', 'warn', 'error', 'fatal'] as const;
@@ -29,6 +30,7 @@ export interface AppConfig {
   readonly env: Environment;
   readonly port: number;
   readonly logLevel: LogLevel;
+  readonly persistence: { readonly store: Store; readonly databaseUrl: string | undefined };
   readonly auth: { readonly apiKeys: readonly ApiKeyConfig[] };
   readonly fx: { readonly rates: readonly FxRateConfig[] };
   readonly kafka: KafkaConfig;
